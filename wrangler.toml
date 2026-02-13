@@ -1,0 +1,12 @@
+name = "ns-italsem"
+compatibility_date = "2026-02-13"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ns_italsem_db"
+database_id = "fb2211dc-e900-4ace-aba4-adb4a8da651d"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ns-italsem-allegati"
