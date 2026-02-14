@@ -300,6 +300,7 @@ function App() {
         monthKey,
         monthLabel: monthLabelFromKey(monthKey) || monthLabelFromIsoDate(reportDate),
         rows,
+        closed: false,
       };
       setDraftReport(report);
     } catch {
@@ -343,6 +344,34 @@ function App() {
         [selectedCard.id]: updated,
       };
     });
+  };
+
+  const updateReport = (reportId, updater) => {
+    if (!selectedCard) return;
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).map((report) =>
+        report.id === reportId ? updater(report) : report,
+      );
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
+    });
+  };
+
+  const deleteReport = (reportId) => {
+    if (!selectedCard) return;
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).filter((report) => report.id !== reportId);
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
+    });
+  };
+
+  const closeReport = (reportId) => {
+    updateReport(reportId, (report) => ({ ...report, closed: true }));
+  };
+
+  const saveReport = (reportId) => {
+    updateReport(reportId, (report) => ({ ...report, savedAt: new Date().toISOString() }));
   };
 
   const handleAttachmentChange = async (reportId, rowId, file) => {
@@ -391,23 +420,21 @@ function App() {
   const appendAttachmentsSection = async (doc, rowsWithAttachments) => {
     if (rowsWithAttachments.length === 0) return;
 
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const slotX = 32;
-    const slotWidth = pageWidth - slotX * 2;
-    const slotHeight = 330;
-    const slotsY = [72, 430];
-
     for (let i = 0; i < rowsWithAttachments.length; i += 1) {
-      if (i % 2 === 0) {
-        doc.addPage("a4", "portrait");
-        doc.setFillColor(255, 122, 26);
-        doc.rect(0, 0, pageWidth, 44, "F");
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(12);
-        doc.text("NS-ITALSEM · Allegati nota spese", 24, 28);
-      }
+      doc.addPage("a4", "portrait");
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const slotX = 32;
+      const slotY = 72;
+      const slotWidth = pageWidth - slotX * 2;
+      const slotHeight = pageHeight - 96;
 
-      const slotY = slotsY[i % 2];
+      doc.setFillColor(255, 122, 26);
+      doc.rect(0, 0, pageWidth, 44, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(12);
+      doc.text("NS-ITALSEM · Allegati nota spese", 24, 28);
+
       const row = rowsWithAttachments[i];
       const preview = await renderAttachmentPreview(row.attachment);
 
@@ -423,7 +450,18 @@ function App() {
       doc.text(`File: ${row.attachment?.name || "-"}`, slotX + 12, slotY + 34);
 
       if (preview?.kind === "image") {
-        doc.addImage(preview.dataUrl, preview.format, slotX + 12, slotY + 46, slotWidth - 24, slotHeight - 58);
+        const availableWidth = slotWidth - 24;
+        const availableHeight = slotHeight - 58;
+        const imageProperties = doc.getImageProperties(preview.dataUrl);
+        const scale = Math.min(
+          availableWidth / imageProperties.width,
+          availableHeight / imageProperties.height,
+        );
+        const drawWidth = imageProperties.width * scale;
+        const drawHeight = imageProperties.height * scale;
+        const drawX = slotX + 12 + (availableWidth - drawWidth) / 2;
+        const drawY = slotY + 46 + (availableHeight - drawHeight) / 2;
+        doc.addImage(preview.dataUrl, preview.format, drawX, drawY, drawWidth, drawHeight);
       } else {
         doc.setFontSize(11);
         doc.text(
@@ -741,6 +779,11 @@ function App() {
                   <div className="report-head">
                     <strong>{report.monthLabel}</strong>
                     <span>Caricata il {formatDate(report.createdAt)}</span>
+                    <div className="header-actions">
+                      <button type="button" className="danger" onClick={() => deleteReport(report.id)}>
+                        Elimina nota spesa
+                      </button>
+                    </div>
                   </div>
 
                   <div className="expense-table">
@@ -762,6 +805,7 @@ function App() {
                         <span>{formatAmount(row.amount)}</span>
                         <select
                           value={row.category}
+                          disabled={report.closed}
                           onChange={(e) => updateRow(report.id, row.id, "category", e.target.value)}
                         >
                           <option value="">Seleziona categoria</option>
@@ -774,6 +818,7 @@ function App() {
                         <input
                           type="text"
                           value={row.detailDescription}
+                          disabled={report.closed}
                           onChange={(e) =>
                             updateRow(report.id, row.id, "detailDescription", e.target.value)
                           }
@@ -782,11 +827,26 @@ function App() {
                         <input
                           type="file"
                           accept=".pdf,.jpg,.jpeg,.png"
+                          disabled={report.closed}
                           onChange={(e) => handleAttachmentChange(report.id, row.id, e.target.files?.[0])}
                         />
                         {row.attachment?.name && <small>{row.attachment.name}</small>}
                       </div>
                     ))}
+                  </div>
+
+                  <div className="report-actions">
+                    <button type="button" className="accent" onClick={() => saveReport(report.id)}>
+                      Salva nota spesa
+                    </button>
+                    <button
+                      type="button"
+                      className="accent"
+                      onClick={() => closeReport(report.id)}
+                      disabled={report.closed}
+                    >
+                      {report.closed ? "Nota spesa chiusa" : "Chiudi nota spesa"}
+                    </button>
                   </div>
                 </div>
               ))

@@ -187,6 +187,13 @@ input { font-family: inherit; }
 
 .report-box { padding: 12px; margin-bottom: 12px; }
 
+.report-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
 .report-head {
   display: flex;
   justify-content: space-between;
