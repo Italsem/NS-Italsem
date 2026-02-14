@@ -388,6 +388,10 @@ function App() {
     });
   };
 
+  const removeAttachment = (reportId, rowId) => {
+    updateRow(reportId, rowId, "attachment", null);
+  };
+
   const renderAttachmentPreview = async (attachment) => {
     if (!attachment?.dataUrl) return null;
 
@@ -420,57 +424,86 @@ function App() {
   const appendAttachmentsSection = async (doc, rowsWithAttachments) => {
     if (rowsWithAttachments.length === 0) return;
 
-    for (let i = 0; i < rowsWithAttachments.length; i += 1) {
-      doc.addPage("a4", "portrait");
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const slotX = 32;
-      const slotY = 72;
-      const slotWidth = pageWidth - slotX * 2;
-      const slotHeight = pageHeight - 96;
+    const pageWidth = 595;
+    const slotX = 30;
+    const slotWidth = pageWidth - slotX * 2;
+    const slotHeight = 340;
+    const slotsY = [70, 430];
 
+    for (let i = 0; i < rowsWithAttachments.length; i += 2) {
+      doc.addPage("a4", "portrait");
       doc.setFillColor(255, 122, 26);
       doc.rect(0, 0, pageWidth, 44, "F");
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(12);
       doc.text("NS-ITALSEM · Allegati nota spese", 24, 28);
-
-      const row = rowsWithAttachments[i];
-      const preview = await renderAttachmentPreview(row.attachment);
-
       doc.setTextColor(40, 40, 40);
-      doc.setDrawColor(210, 210, 210);
-      doc.roundedRect(slotX, slotY, slotWidth, slotHeight, 6, 6);
-      doc.setFontSize(10);
-      doc.text(
-        `${formatDate(row.date)} · ${row.category || "SENZA CATEGORIA"} · ${formatAmount(row.amount)}`,
-        slotX + 12,
-        slotY + 18,
-      );
-      doc.text(`File: ${row.attachment?.name || "-"}`, slotX + 12, slotY + 34);
 
-      if (preview?.kind === "image") {
-        const availableWidth = slotWidth - 24;
-        const availableHeight = slotHeight - 58;
-        const imageProperties = doc.getImageProperties(preview.dataUrl);
-        const scale = Math.min(
-          availableWidth / imageProperties.width,
-          availableHeight / imageProperties.height,
-        );
-        const drawWidth = imageProperties.width * scale;
-        const drawHeight = imageProperties.height * scale;
-        const drawX = slotX + 12 + (availableWidth - drawWidth) / 2;
-        const drawY = slotY + 46 + (availableHeight - drawHeight) / 2;
-        doc.addImage(preview.dataUrl, preview.format, drawX, drawY, drawWidth, drawHeight);
-      } else {
-        doc.setFontSize(11);
+      for (let slotIndex = 0; slotIndex < 2; slotIndex += 1) {
+        const row = rowsWithAttachments[i + slotIndex];
+        if (!row) break;
+
+        const slotY = slotsY[slotIndex];
+        const preview = await renderAttachmentPreview(row.attachment);
+
+        doc.setDrawColor(210, 210, 210);
+        doc.roundedRect(slotX, slotY, slotWidth, slotHeight, 6, 6);
+        doc.setFontSize(10);
         doc.text(
-          preview?.kind === "pdf"
-            ? "Anteprima PDF non disponibile: file allegato registrato nel report"
-            : "Formato allegato non supportato in anteprima",
+          `${formatDate(row.date)} · ${row.category || "SENZA CATEGORIA"} · ${formatAmount(row.amount)}`,
           slotX + 12,
-          slotY + 62,
+          slotY + 18,
         );
+        doc.text(`File: ${row.attachment?.name || "-"}`, slotX + 12, slotY + 34);
+
+        if (preview?.kind === "image") {
+          const availableWidth = slotWidth - 24;
+          const availableHeight = slotHeight - 58;
+          const imageProperties = doc.getImageProperties(preview.dataUrl);
+
+          const normalScale = Math.min(
+            availableWidth / imageProperties.width,
+            availableHeight / imageProperties.height,
+          );
+          const rotatedScale = Math.min(
+            availableWidth / imageProperties.height,
+            availableHeight / imageProperties.width,
+          );
+          const useRotation = rotatedScale > normalScale * 1.08;
+
+          const drawWidth = useRotation
+            ? imageProperties.height * rotatedScale
+            : imageProperties.width * normalScale;
+          const drawHeight = useRotation
+            ? imageProperties.width * rotatedScale
+            : imageProperties.height * normalScale;
+
+          const centerX = slotX + 12 + availableWidth / 2;
+          const centerY = slotY + 46 + availableHeight / 2;
+          const drawX = centerX - drawWidth / 2;
+          const drawY = centerY - drawHeight / 2;
+
+          doc.addImage(
+            preview.dataUrl,
+            preview.format,
+            drawX,
+            drawY,
+            drawWidth,
+            drawHeight,
+            undefined,
+            "FAST",
+            useRotation ? 90 : 0,
+          );
+        } else {
+          doc.setFontSize(11);
+          doc.text(
+            preview?.kind === "pdf"
+              ? "Anteprima PDF non disponibile: file allegato registrato nel report"
+              : "Formato allegato non supportato in anteprima",
+            slotX + 12,
+            slotY + 62,
+          );
+        }
       }
     }
   };
@@ -831,6 +864,16 @@ function App() {
                           onChange={(e) => handleAttachmentChange(report.id, row.id, e.target.files?.[0])}
                         />
                         {row.attachment?.name && <small>{row.attachment.name}</small>}
+                        {row.attachment && (
+                          <button
+                            type="button"
+                            className="danger inline-danger"
+                            disabled={report.closed}
+                            onClick={() => removeAttachment(report.id, row.id)}
+                          >
+                            Elimina allegato
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

@@ -54,7 +54,7 @@ input { font-family: inherit; }
 
 .header-actions .danger { background: #e14f40; color: #fff; }
 
-.content-wrap { padding: 24px 28px 36px; }
+.content-wrap { padding: 24px 40px 36px; max-width: 1480px; margin: 0 auto; }
 
 .new-card {
   background: var(--panel);
@@ -80,10 +80,28 @@ input { font-family: inherit; }
 
 .four-per-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(190px, 1fr));
   gap: 14px;
   align-items: stretch;
-  padding-bottom: 8px;
+  padding: 0 12px 8px;
+}
+
+.month-picker {
+  display: grid;
+  gap: 6px;
+  color: #ffc18f;
+  font-size: 0.9rem;
+}
+
+.draft-box {
+  border: 1px solid #ff9e55;
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #3a2d24;
 }
 
 .month-picker {
@@ -108,14 +126,15 @@ input { font-family: inherit; }
   background: var(--panel);
   border: 1px solid #3f4148;
   border-radius: 16px;
-  padding: 12px;
+  padding: 10px;
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
 
+
 .card-preview-wrap { position: relative; }
-.card-img { width: 100%; border-radius: 14px; }
+.card-img { width: 100%; max-height: 150px; object-fit: cover; border-radius: 12px; }
 
 .status-dot {
   position: absolute;
@@ -241,4 +260,15 @@ input { font-family: inherit; }
 
 @media (max-width: 700px) {
   .four-per-row { grid-template-columns: 1fr; }
+}
+
+.inline-danger {
+  padding: 6px 10px;
+  font-size: 0.76rem;
+  border-radius: 8px;
+  border: none;
+  background: #e14f40;
+  color: #fff;
+  cursor: pointer;
+  width: fit-content;
 }
