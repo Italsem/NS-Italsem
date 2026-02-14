@@ -69,6 +69,7 @@ input { font-family: inherit; }
 .expense-row input[type="text"],
 .expense-row input[type="file"],
 .totals-box input,
+.month-picker input,
 .expense-row select {
   background: #24262d;
   border: 1px solid #444853;
@@ -77,14 +78,30 @@ input { font-family: inherit; }
   padding: 9px 11px;
 }
 
-.four-per-column {
+.four-per-row {
   display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: repeat(4, minmax(0, auto));
-  grid-auto-columns: minmax(260px, 1fr);
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
   gap: 14px;
-  overflow-x: auto;
+  align-items: stretch;
   padding-bottom: 8px;
+}
+
+.month-picker {
+  display: grid;
+  gap: 6px;
+  color: #ffc18f;
+  font-size: 0.9rem;
+}
+
+.draft-box {
+  border: 1px solid #ff9e55;
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #3a2d24;
 }
 
 .card-item {
@@ -192,6 +209,10 @@ input { font-family: inherit; }
   border-bottom: 1px solid #3e414a;
 }
 
+.expense-row small {
+  color: var(--muted);
+}
+
 .table-head { background: var(--panel-soft); font-weight: 700; }
 
 .error-box {
@@ -208,4 +229,9 @@ input { font-family: inherit; }
 
 @media (max-width: 1024px) {
   .expense-window { grid-template-columns: 1fr; }
+  .four-per-row { grid-template-columns: repeat(2, minmax(220px, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .four-per-row { grid-template-columns: 1fr; }
 }
