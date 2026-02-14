@@ -96,6 +96,32 @@ const monthStartLabel = (monthKey) => {
   return `01/${month}/${year}`;
 };
 
+const safeNumber = (value) => {
+  const n = parseAmount(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const normalizeReport = (report) => {
+  const rows = (report?.rows || []).map((row) => ({
+    ...row,
+    amount: safeNumber(row?.amount),
+    date: parseDate(row?.date),
+  }));
+
+  const fallbackDate = rows[0]?.date || report?.createdAt || new Date().toISOString();
+  const monthKey = report?.monthKey || monthKeyFromIsoDate(fallbackDate);
+
+  return {
+    ...report,
+    monthKey,
+    monthLabel: report?.monthLabel || monthLabelFromKey(monthKey) || monthLabelFromIsoDate(fallbackDate),
+    rows,
+    closed: Boolean(report?.closed),
+  };
+};
+
+const normalizeReports = (reports = []) => reports.map(normalizeReport);
+
 let xlsxLoader = null;
 let pdfToolsLoader = null;
 let pdfJsLoader = null;
@@ -186,7 +212,7 @@ function App() {
       let localReports = [];
       try {
         const raw = localStorage.getItem(reportStorageKey(selectedCard.id));
-        localReports = raw ? JSON.parse(raw) : [];
+        localReports = normalizeReports(raw ? JSON.parse(raw) : []);
       } catch {
         localReports = [];
       }
@@ -197,7 +223,7 @@ function App() {
         const res = await fetch(`/api/reports?cardId=${selectedCard.id}`);
         if (!res.ok) return;
         const data = await res.json();
-        const apiReports = data.reports || [];
+        const apiReports = normalizeReports(data.reports || []);
         const finalReports = apiReports.length > 0 ? apiReports : localReports;
         localStorage.setItem(reportStorageKey(selectedCard.id), JSON.stringify(finalReports));
         setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: finalReports }));
@@ -210,12 +236,13 @@ function App() {
   }, [selectedCard]);
 
   const persistReports = async (cardId, reports) => {
-    localStorage.setItem(reportStorageKey(cardId), JSON.stringify(reports));
+    const normalized = normalizeReports(reports);
+    localStorage.setItem(reportStorageKey(cardId), JSON.stringify(normalized));
     try {
       await fetch("/api/reports", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cardId, reports }),
+        body: JSON.stringify({ cardId, reports: normalized }),
       });
     } catch {
       // già salvato in locale
@@ -320,7 +347,7 @@ function App() {
       persistReports(selectedCard.id, updated);
       return { ...prev, [selectedCard.id]: updated };
     });
-    setSelectedMonth(draftReport.monthKey);
+    setSelectedMonth(draftReport.monthKey || monthKeyFromIsoDate(draftReport.rows?.[0]?.date || draftReport.createdAt));
     setDraftReport(null);
   };
 
@@ -421,6 +448,53 @@ function App() {
     return { kind: "unsupported", filename: attachment.name };
   };
 
+  const fitAttachmentImage = async (dataUrl, rotate) =>
+    new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => {
+        const sourceWidth = image.width;
+        const sourceHeight = image.height;
+        const maxSide = 1800;
+        const scaleDown = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+        const scaledWidth = Math.max(1, Math.round(sourceWidth * scaleDown));
+        const scaledHeight = Math.max(1, Math.round(sourceHeight * scaleDown));
+        const canvas = document.createElement("canvas");
+
+        if (rotate) {
+          canvas.width = scaledHeight;
+          canvas.height = scaledWidth;
+        } else {
+          canvas.width = scaledWidth;
+          canvas.height = scaledHeight;
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve({ dataUrl, width: sourceWidth, height: sourceHeight });
+          return;
+        }
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        if (rotate) {
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(image, -scaledWidth / 2, -scaledHeight / 2, scaledWidth, scaledHeight);
+        } else {
+          ctx.drawImage(image, 0, 0, scaledWidth, scaledHeight);
+        }
+
+        resolve({
+          dataUrl: canvas.toDataURL("image/jpeg", 0.9),
+          width: canvas.width,
+          height: canvas.height,
+        });
+      };
+      image.onerror = () => resolve({ dataUrl, width: 1000, height: 1400 });
+      image.src = dataUrl;
+    });
+
   const appendAttachmentsSection = async (doc, rowsWithAttachments) => {
     if (rowsWithAttachments.length === 0) return;
 
@@ -470,30 +544,20 @@ function App() {
             availableHeight / imageProperties.width,
           );
           const useRotation = rotatedScale > normalScale * 1.08;
+          const preparedImage = await fitAttachmentImage(preview.dataUrl, useRotation);
+          const fitScale = Math.min(
+            availableWidth / preparedImage.width,
+            availableHeight / preparedImage.height,
+          );
 
-          const drawWidth = useRotation
-            ? imageProperties.height * rotatedScale
-            : imageProperties.width * normalScale;
-          const drawHeight = useRotation
-            ? imageProperties.width * rotatedScale
-            : imageProperties.height * normalScale;
-
+          const drawWidth = preparedImage.width * fitScale;
+          const drawHeight = preparedImage.height * fitScale;
           const centerX = slotX + 12 + availableWidth / 2;
           const centerY = slotY + 46 + availableHeight / 2;
           const drawX = centerX - drawWidth / 2;
           const drawY = centerY - drawHeight / 2;
 
-          doc.addImage(
-            preview.dataUrl,
-            preview.format,
-            drawX,
-            drawY,
-            drawWidth,
-            drawHeight,
-            undefined,
-            "FAST",
-            useRotation ? 90 : 0,
-          );
+          doc.addImage(preparedImage.dataUrl, "JPEG", drawX, drawY, drawWidth, drawHeight);
         } else {
           doc.setFontSize(11);
           doc.text(
@@ -551,10 +615,10 @@ function App() {
     [visibleReports],
   );
 
-  const totalAll = rowsForCurrentFilter.reduce((sum, row) => sum + row.amount, 0);
+  const totalAll = rowsForCurrentFilter.reduce((sum, row) => sum + safeNumber(row.amount), 0);
   const totalExpenses = rowsForCurrentFilter
-    .filter((row) => row.amount < 0)
-    .reduce((sum, row) => sum + row.amount, 0);
+    .filter((row) => safeNumber(row.amount) < 0)
+    .reduce((sum, row) => sum + safeNumber(row.amount), 0);
 
   const openingBalance = parseAmount(openingBalanceByMonth[selectedMonth] || 0);
   const closingBalance = openingBalance + totalAll;
@@ -761,7 +825,7 @@ function App() {
           <section className="expense-content">
             <div className="totals-box">
               <label>
-                Saldo al {monthStartLabel(selectedMonth)}
+                Saldo al {monthStartLabel(selectedMonth === "all" ? visibleReports[0]?.monthKey : selectedMonth)}
                 <input
                   type="text"
                   value={openingBalanceByMonth[selectedMonth] || ""}

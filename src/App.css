@@ -104,24 +104,6 @@ input { font-family: inherit; }
   background: #3a2d24;
 }
 
-.month-picker {
-  display: grid;
-  gap: 6px;
-  color: #ffc18f;
-  font-size: 0.9rem;
-}
-
-.draft-box {
-  border: 1px solid #ff9e55;
-  border-radius: 10px;
-  padding: 10px;
-  margin-bottom: 10px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: #3a2d24;
-}
-
 .card-item {
   background: var(--panel);
   border: 1px solid #3f4148;
