@@ -110,35 +110,86 @@ const buildPdfBlob = (title, subtitleLines, headers, rows) => {
     String(text)
       .replace(/\\/g, "\\\\")
       .replace(/\(/g, "\\(")
-      .replace(/\)/g, "\\)");
+      .replace(/\)/g, "\\)")
+      .replace(/€/g, "\\200");
 
-  const lines = [title, ...subtitleLines, "", headers.join(" | "), ...rows.map((row) => row.join(" | "))];
-  const content = lines.map((line, index) => {
-    const y = 800 - index * 14;
-    return `BT /F1 9 Tf 30 ${y} Td (${escapeText(line)}) Tj ET`;
+  const fitCell = (value, width) => {
+    const text = String(value || "-");
+    if (text.length >= width) return `${text.slice(0, Math.max(0, width - 1))}…`;
+    return text.padEnd(width, " ");
+  };
+
+  const widths = [10, 14, 10, 26, 20, 22, 12, 16];
+  const tableHeader = headers.map((h, i) => fitCell(h, widths[i] || 12)).join(" ");
+  const tableRows = rows.map((row) => row.map((cell, i) => fitCell(cell, widths[i] || 12)).join(" "));
+
+  const lineHeight = 13;
+  const topY = 812;
+  const bottomY = 36;
+  const linesPerPage = Math.floor((topY - bottomY) / lineHeight);
+  const allLines = [
+    "ITALSEM",
+    title,
+    ...subtitleLines,
+    "",
+    tableHeader,
+    ...tableRows,
+  ];
+
+  const pages = [];
+  for (let i = 0; i < allLines.length; i += linesPerPage) {
+    pages.push(allLines.slice(i, i + linesPerPage));
+  }
+
+  const objects = [];
+  const addObject = (content) => {
+    objects.push(content);
+    return objects.length;
+  };
+
+  const catalogId = addObject('<< /Type /Catalog /Pages 2 0 R >>');
+  addObject('<< /Type /Pages /Kids [] /Count 0 >>');
+  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+
+  const pageIds = [];
+
+  pages.forEach((pageLines, pageIndex) => {
+    const contentLines = [];
+    contentLines.push("1 0.48 0.1 rg");
+    contentLines.push("0 820 842 22 re f");
+    contentLines.push("0 0 0 rg");
+    pageLines.forEach((line, lineIndex) => {
+      const y = topY - lineIndex * lineHeight;
+      const fontSize = lineIndex === 1 ? 12 : 9;
+      contentLines.push(`BT /F1 ${fontSize} Tf 30 ${y} Td (${escapeText(line)}) Tj ET`);
+    });
+    contentLines.push("1 0.48 0.1 rg");
+    contentLines.push("30 802 782 1 re f");
+    contentLines.push("0 0 0 rg");
+    contentLines.push(`BT /F1 8 Tf 730 20 Td (pag. ${pageIndex + 1}/${pages.length}) Tj ET`);
+
+    const stream = contentLines.join("\n");
+    const contentId = addObject(`<< /Length ${stream.length} >> stream\n${stream}\nendstream`);
+    const pageId = addObject(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+    );
+    pageIds.push(pageId);
   });
 
-  const stream = content.join("\n");
-  const objects = [
-    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
-    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
-    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
-    "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
-    `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
-  ];
+  objects[1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
 
   let pdf = "%PDF-1.4\n";
   const xref = [0];
-  objects.forEach((obj) => {
+  objects.forEach((obj, index) => {
     xref.push(pdf.length);
-    pdf += `${obj}\n`;
+    pdf += `${index + 1} 0 obj ${obj} endobj\n`;
   });
   const xrefStart = pdf.length;
   pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
   xref.slice(1).forEach((offset) => {
     pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   });
-  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+  pdf += `trailer << /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
   return new Blob([pdf], { type: "application/pdf" });
 };
 
@@ -176,6 +227,26 @@ function App() {
   useEffect(() => {
     loadCards();
   }, []);
+
+  useEffect(() => {
+    const loadReports = async () => {
+      if (!selectedCard) return;
+      const res = await fetch(`/api/reports?cardId=${selectedCard.id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: data.reports || [] }));
+    };
+
+    loadReports();
+  }, [selectedCard]);
+
+  const persistReports = async (cardId, reports) => {
+    await fetch("/api/reports", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cardId, reports }),
+    });
+  };
 
   const createCard = async () => {
     if (newLast4.length !== 4 || !newHolder.trim()) return;
@@ -268,7 +339,9 @@ function App() {
     if (!selectedCard || !draftReport) return;
     setReportsByCard((prev) => {
       const current = prev[selectedCard.id] || [];
-      return { ...prev, [selectedCard.id]: [draftReport, ...current] };
+      const updated = [draftReport, ...current];
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
     });
     setSelectedMonth(draftReport.monthKey);
     setDraftReport(null);
@@ -277,9 +350,8 @@ function App() {
   const updateRow = (reportId, rowId, key, value) => {
     if (!selectedCard) return;
 
-    setReportsByCard((prev) => ({
-      ...prev,
-      [selectedCard.id]: (prev[selectedCard.id] || []).map((report) =>
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).map((report) =>
         report.id !== reportId
           ? report
           : {
@@ -288,8 +360,13 @@ function App() {
                 row.id === rowId ? { ...row, [key]: value } : row,
               ),
             },
-      ),
-    }));
+      );
+      persistReports(selectedCard.id, updated);
+      return {
+        ...prev,
+        [selectedCard.id]: updated,
+      };
+    });
   };
 
   const monthlyHistory = useMemo(() => {
