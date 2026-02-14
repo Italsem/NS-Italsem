@@ -16,7 +16,10 @@ const formatDate = (value) => {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("it-IT");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 };
 
 const formatAmount = (value) => {
@@ -62,6 +65,14 @@ const monthFromDate = (value) => {
   return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
 };
 
+const monthLabelFromInput = (value) => {
+  if (!value) return "";
+  const [year, month] = value.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
+};
+
 const monthStartLabel = (monthLabel) => {
   if (!monthLabel || monthLabel === "all") return "01/01/2026";
   const date = new Date(`01 ${monthLabel}`);
@@ -70,6 +81,7 @@ const monthStartLabel = (monthLabel) => {
 };
 
 let xlsxLoader = null;
+let pdfLoader = null;
 const loadXlsx = async () => {
   if (!xlsxLoader) {
     xlsxLoader = import("https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs");
@@ -77,52 +89,26 @@ const loadXlsx = async () => {
   return xlsxLoader;
 };
 
-const buildPdfBlob = (title, lines) => {
-  const escapeText = (text) =>
-    String(text)
-      .replace(/\\/g, "\\\\")
-      .replace(/\(/g, "\\(")
-      .replace(/\)/g, "\\)");
-
-  const content = [title, "", ...lines].map((line, index) => {
-    const y = 800 - index * 16;
-    return `BT /F1 10 Tf 40 ${y} Td (${escapeText(line)}) Tj ET`;
-  });
-
-  const stream = content.join("\n");
-
-  const objects = [
-    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
-    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
-    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
-    "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
-    `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
-  ];
-
-  let pdf = "%PDF-1.4\n";
-  const xref = [0];
-  objects.forEach((obj) => {
-    xref.push(pdf.length);
-    pdf += `${obj}\n`;
-  });
-  const xrefStart = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  xref.slice(1).forEach((offset) => {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  });
-  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
-
-  return new Blob([pdf], { type: "application/pdf" });
+const loadPdfTools = async () => {
+  if (!pdfLoader) {
+    pdfLoader = Promise.all([
+      import("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/+esm"),
+      import("https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/+esm"),
+    ]);
+  }
+  return pdfLoader;
 };
 
-const downloadBlob = (blob, fileName) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
+const loadLogoDataUrl = async () => {
+  const res = await fetch("/logo-italsem.png");
+  const blob = await res.blob();
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
 };
+
 
 function App() {
   const [cards, setCards] = useState([]);
@@ -132,6 +118,8 @@ function App() {
   const [reportsByCard, setReportsByCard] = useState({});
   const [selectedMonth, setSelectedMonth] = useState("all");
   const [importError, setImportError] = useState("");
+  const [reportMonthInput, setReportMonthInput] = useState("");
+  const [draftReport, setDraftReport] = useState(null);
   const [openingBalanceByMonth, setOpeningBalanceByMonth] = useState({});
   const fileInputRef = useRef(null);
 
@@ -214,19 +202,14 @@ function App() {
       setImportError("");
       const rows = await parseWorkbook(file);
       const reportDate = rows[0]?.date || new Date().toISOString();
+      const reportMonth = monthLabelFromInput(reportMonthInput) || monthFromDate(reportDate);
       const report = {
         id: `${Date.now()}`,
         createdAt: new Date().toISOString(),
-        month: monthFromDate(reportDate),
+        month: reportMonth,
         rows,
       };
-
-      setReportsByCard((prev) => {
-        const current = prev[selectedCard.id] || [];
-        return { ...prev, [selectedCard.id]: [report, ...current] };
-      });
-
-      setSelectedMonth(report.month);
+      setDraftReport(report);
     } catch {
       setImportError(
         "Import non riuscito. Il file deve avere le colonne: Data operazione, Carta, Descrizione, Importo in euro.",
@@ -234,6 +217,16 @@ function App() {
     } finally {
       event.target.value = "";
     }
+  };
+
+  const saveDraftReport = () => {
+    if (!selectedCard || !draftReport) return;
+    setReportsByCard((prev) => {
+      const current = prev[selectedCard.id] || [];
+      return { ...prev, [selectedCard.id]: [draftReport, ...current] };
+    });
+    setSelectedMonth(draftReport.month);
+    setDraftReport(null);
   };
 
   const updateRow = (reportId, rowId, key, value) => {
@@ -296,54 +289,80 @@ function App() {
   const openingBalance = parseAmount(openingBalanceByMonth[selectedMonth] || 0);
   const closingBalance = openingBalance + totalAll;
 
-  const exportSummaryPdf = () => {
+  const exportSummaryPdf = async () => {
     if (!selectedCard) return;
+    const [{ jsPDF }, { default: autoTable }] = await loadPdfTools();
+    const doc = new jsPDF({ orientation: "landscape" });
+    const logo = await loadLogoDataUrl();
 
-    const lines = [
-      `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
-      `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale movimenti (incluse ricariche): ${formatAmount(totalAll)}`,
-      `Saldo finale: ${formatAmount(closingBalance)}`,
-      "",
-      "Dettaglio:",
-    ];
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 300, 22, "F");
+    doc.addImage(logo, "PNG", 8, 4, 30, 12);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("Riepilogo Totale Nota Spese", 45, 13);
+    doc.setTextColor(40, 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`, 8, 30);
+    doc.text(`Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`, 8, 36);
+    doc.text(`Saldo iniziale: ${formatAmount(openingBalance)}`, 100, 30);
+    doc.text(`Totale movimenti: ${formatAmount(totalAll)}`, 100, 36);
+    doc.text(`Saldo finale: ${formatAmount(closingBalance)}`, 100, 42);
 
-    rowsForCurrentFilter.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.cardLabel || "-"} | ${row.movement || "-"} | ${
-          row.category || "-"
-        } | ${row.detailDescription || "-"} | ${formatAmount(row.amount)}`,
-      );
+    autoTable(doc, {
+      startY: 48,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [255, 122, 26] },
+      head: [["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"]],
+      body: rowsForCurrentFilter.map((row) => [
+        formatDate(row.date),
+        row.month || "-",
+        row.cardLabel || "-",
+        row.movement || "-",
+        row.category || "-",
+        row.detailDescription || "-",
+        formatAmount(row.amount),
+        row.attachment?.name || "-",
+      ]),
     });
 
-    const blob = buildPdfBlob("Riepilogo nota spese", lines);
-    downloadBlob(blob, `riepilogo-${selectedCard.card_last4}.pdf`);
+    doc.save(`riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
-  const exportExpensesPdf = () => {
+  const exportExpensesPdf = async () => {
     if (!selectedCard) return;
-
+    const [{ jsPDF }, { default: autoTable }] = await loadPdfTools();
+    const doc = new jsPDF({ orientation: "landscape" });
+    const logo = await loadLogoDataUrl();
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
-    const lines = [
-      `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
-      `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale sole spese (solo importi negativi): ${formatAmount(totalExpenses)}`,
-      "",
-      "Dettaglio categorie spese:",
-    ];
 
-    expenseRows.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.category || "SENZA CATEGORIA"} | ${formatAmount(
-          row.amount,
-        )}`,
-      );
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 300, 22, "F");
+    doc.addImage(logo, "PNG", 8, 4, 30, 12);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("Export Sole Spese", 45, 13);
+    doc.setTextColor(40, 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`, 8, 30);
+    doc.text(`Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`, 8, 36);
+    doc.text(`Totale sole spese: ${formatAmount(totalExpenses)}`, 100, 30);
+
+    autoTable(doc, {
+      startY: 42,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [255, 122, 26] },
+      head: [["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"]],
+      body: expenseRows.map((row) => [
+        formatDate(row.date),
+        row.month || "-",
+        row.category || "SENZA CATEGORIA",
+        row.detailDescription || "-",
+        formatAmount(row.amount),
+      ]),
     });
 
-    const blob = buildPdfBlob("Export sole spese", lines);
-    downloadBlob(blob, `sole-spese-${selectedCard.card_last4}.pdf`);
+    doc.save(`sole-spese-${selectedCard.card_last4}.pdf`);
   };
 
   if (selectedCard) {
@@ -369,8 +388,16 @@ function App() {
           <aside className="history-panel">
             <h3>Storico note spese</h3>
             <button type="button" className="accent" onClick={() => fileInputRef.current?.click()}>
-              + Aggiungi nota spesa (.xlsx)
+              Importa movimenti (.xlsx)
             </button>
+            <label className="month-picker">
+              Mese nota spese
+              <input
+                type="month"
+                value={reportMonthInput}
+                onChange={(e) => setReportMonthInput(e.target.value)}
+              />
+            </label>
             <input
               ref={fileInputRef}
               type="file"
@@ -435,6 +462,15 @@ function App() {
 
             {importError && <p className="error-box">{importError}</p>}
 
+            {draftReport && (
+              <div className="draft-box">
+                <strong>Bozza pronta: {draftReport.month}</strong>
+                <button type="button" className="accent" onClick={saveDraftReport}>
+                  Salva nota spese
+                </button>
+              </div>
+            )}
+
             {visibleReports.length === 0 ? (
               <p className="empty-state">
                 Nessuna nota spese per questo filtro. Carica un file Excel con intestazioni:
@@ -492,10 +528,16 @@ function App() {
                               report.id,
                               row.id,
                               "attachment",
-                              e.target.files?.[0]?.name || "",
+                              e.target.files?.[0]
+                                ? {
+                                    name: e.target.files[0].name,
+                                    type: e.target.files[0].type,
+                                  }
+                                : null,
                             )
                           }
                         />
+                        {row.attachment?.name && <small>{row.attachment.name}</small>}
                       </div>
                     ))}
                   </div>
@@ -514,7 +556,6 @@ function App() {
         <img src="/logo-italsem.png" alt="Logo Italsem" className="brand-logo" />
         <div className="title-group">
           <h1>Dashboard Note Spese</h1>
-          <p>Massimo 4 carte per colonna</p>
         </div>
       </header>
 
@@ -537,7 +578,7 @@ function App() {
           </div>
         </section>
 
-        <section className="grid four-per-column">
+        <section className="grid four-per-row">
           {cards.map((card) => (
             <button
               key={card.id}
