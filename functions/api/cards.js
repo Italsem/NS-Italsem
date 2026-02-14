@@ -28,6 +28,7 @@ export async function onRequest(context) {
     const body = await request.json();
     const { id } = body;
 
+    await env.DB.prepare("DELETE FROM expense_reports WHERE card_id = ?").bind(id).run();
     await env.DB.prepare("DELETE FROM cards WHERE id = ?").bind(id).run();
 
     return Response.json({ success: true });
