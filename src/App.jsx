@@ -16,7 +16,10 @@ const formatDate = (value) => {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("it-IT");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 };
 
 const formatAmount = (value) => {
@@ -45,10 +48,20 @@ const parseDate = (raw) => {
   if (raw instanceof Date) return raw.toISOString();
   if (!raw) return new Date().toISOString();
 
+  if (typeof raw === "number") {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const date = new Date(excelEpoch.getTime() + raw * 24 * 60 * 60 * 1000);
+    return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  }
+
   const text = String(raw).trim();
-  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
   if (slash) {
-    return new Date(`${slash[3]}-${slash[2]}-${slash[1]}T00:00:00`).toISOString();
+    const day = Number(slash[1]);
+    const month = Number(slash[2]);
+    const yearToken = Number(slash[3]);
+    const year = slash[3].length === 2 ? 2000 + yearToken : yearToken;
+    return new Date(year, month - 1, day).toISOString();
   }
 
   const date = new Date(text);
@@ -56,20 +69,36 @@ const parseDate = (raw) => {
   return new Date().toISOString();
 };
 
-const monthFromDate = (value) => {
+const monthLabelFromIsoDate = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "mese non valido";
   return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
 };
 
-const monthStartLabel = (monthLabel) => {
-  if (!monthLabel || monthLabel === "all") return "01/01/2026";
-  const date = new Date(`01 ${monthLabel}`);
-  if (Number.isNaN(date.getTime())) return "01/01/2026";
-  return new Date(date.getFullYear(), date.getMonth(), 1).toLocaleDateString("it-IT");
+const monthLabelFromKey = (value) => {
+  if (!value) return "";
+  const [year, month] = value.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
+};
+
+const monthKeyFromIsoDate = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const monthStartLabel = (monthKey) => {
+  if (!monthKey || monthKey === "all") return "-";
+  const [year, month] = monthKey.split("-");
+  if (!year || !month) return "-";
+  return `01/${month}/${year}`;
 };
 
 let xlsxLoader = null;
+let pdfToolsLoader = null;
+let pdfJsLoader = null;
 const loadXlsx = async () => {
   if (!xlsxLoader) {
     xlsxLoader = import("https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs");
@@ -77,52 +106,55 @@ const loadXlsx = async () => {
   return xlsxLoader;
 };
 
-const buildPdfBlob = (title, lines) => {
-  const escapeText = (text) =>
-    String(text)
-      .replace(/\\/g, "\\\\")
-      .replace(/\(/g, "\\(")
-      .replace(/\)/g, "\\)");
-
-  const content = [title, "", ...lines].map((line, index) => {
-    const y = 800 - index * 16;
-    return `BT /F1 10 Tf 40 ${y} Td (${escapeText(line)}) Tj ET`;
-  });
-
-  const stream = content.join("\n");
-
-  const objects = [
-    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
-    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
-    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
-    "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
-    `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
-  ];
-
-  let pdf = "%PDF-1.4\n";
-  const xref = [0];
-  objects.forEach((obj) => {
-    xref.push(pdf.length);
-    pdf += `${obj}\n`;
-  });
-  const xrefStart = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  xref.slice(1).forEach((offset) => {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  });
-  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
-
-  return new Blob([pdf], { type: "application/pdf" });
+const loadPdfTools = async () => {
+  if (!pdfToolsLoader) {
+    pdfToolsLoader = Promise.all([
+      import("https://esm.sh/jspdf@2.5.1"),
+      import("https://esm.sh/jspdf-autotable@3.8.2"),
+    ]);
+  }
+  return pdfToolsLoader;
 };
 
-const downloadBlob = (blob, fileName) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
+const loadLogoDataUrl = async () => {
+  const res = await fetch("/logo-italsem.png");
+  const blob = await res.blob();
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
 };
+
+const loadPdfJs = async () => {
+  if (!pdfJsLoader) {
+    pdfJsLoader = import("https://esm.sh/pdfjs-dist@4.7.76/build/pdf.min.mjs").then((mod) => {
+      mod.GlobalWorkerOptions.workerSrc = "https://esm.sh/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs";
+      return mod;
+    });
+  }
+  return pdfJsLoader;
+};
+
+const fileToDataUrl =
+  (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+const dataUrlToUint8Array = (dataUrl) => {
+  const base64 = String(dataUrl).split(",")[1] || "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+
+const reportStorageKey = (cardId) => `expense-reports-${cardId}`;
+
 
 function App() {
   const [cards, setCards] = useState([]);
@@ -132,6 +164,8 @@ function App() {
   const [reportsByCard, setReportsByCard] = useState({});
   const [selectedMonth, setSelectedMonth] = useState("all");
   const [importError, setImportError] = useState("");
+  const [reportMonthInput, setReportMonthInput] = useState("");
+  const [draftReport, setDraftReport] = useState(null);
   const [openingBalanceByMonth, setOpeningBalanceByMonth] = useState({});
   const fileInputRef = useRef(null);
 
@@ -144,6 +178,49 @@ function App() {
   useEffect(() => {
     loadCards();
   }, []);
+
+  useEffect(() => {
+    const loadReports = async () => {
+      if (!selectedCard) return;
+
+      let localReports = [];
+      try {
+        const raw = localStorage.getItem(reportStorageKey(selectedCard.id));
+        localReports = raw ? JSON.parse(raw) : [];
+      } catch {
+        localReports = [];
+      }
+
+      setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: localReports }));
+
+      try {
+        const res = await fetch(`/api/reports?cardId=${selectedCard.id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const apiReports = data.reports || [];
+        const finalReports = apiReports.length > 0 ? apiReports : localReports;
+        localStorage.setItem(reportStorageKey(selectedCard.id), JSON.stringify(finalReports));
+        setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: finalReports }));
+      } catch {
+        // fallback locale già applicato
+      }
+    };
+
+    loadReports();
+  }, [selectedCard]);
+
+  const persistReports = async (cardId, reports) => {
+    localStorage.setItem(reportStorageKey(cardId), JSON.stringify(reports));
+    try {
+      await fetch("/api/reports", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cardId, reports }),
+      });
+    } catch {
+      // già salvato in locale
+    }
+  };
 
   const createCard = async () => {
     if (newLast4.length !== 4 || !newHolder.trim()) return;
@@ -174,6 +251,8 @@ function App() {
       return next;
     });
 
+    localStorage.removeItem(reportStorageKey(selectedCard.id));
+
     setSelectedCard(null);
     loadCards();
   };
@@ -185,7 +264,7 @@ function App() {
     if (!firstSheetName) return [];
 
     const sheet = workbook.Sheets[firstSheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
     return rows.map((entry, index) => {
       const date = parseDate(entry["Data operazione"]);
@@ -201,7 +280,7 @@ function App() {
         amount,
         category: "",
         detailDescription: "",
-        attachment: "",
+        attachment: null,
       };
     });
   };
@@ -214,19 +293,16 @@ function App() {
       setImportError("");
       const rows = await parseWorkbook(file);
       const reportDate = rows[0]?.date || new Date().toISOString();
+      const monthKey = reportMonthInput || monthKeyFromIsoDate(reportDate);
       const report = {
         id: `${Date.now()}`,
         createdAt: new Date().toISOString(),
-        month: monthFromDate(reportDate),
+        monthKey,
+        monthLabel: monthLabelFromKey(monthKey) || monthLabelFromIsoDate(reportDate),
         rows,
+        closed: false,
       };
-
-      setReportsByCard((prev) => {
-        const current = prev[selectedCard.id] || [];
-        return { ...prev, [selectedCard.id]: [report, ...current] };
-      });
-
-      setSelectedMonth(report.month);
+      setDraftReport(report);
     } catch {
       setImportError(
         "Import non riuscito. Il file deve avere le colonne: Data operazione, Carta, Descrizione, Importo in euro.",
@@ -236,12 +312,23 @@ function App() {
     }
   };
 
+  const saveDraftReport = () => {
+    if (!selectedCard || !draftReport) return;
+    setReportsByCard((prev) => {
+      const current = prev[selectedCard.id] || [];
+      const updated = [draftReport, ...current];
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
+    });
+    setSelectedMonth(draftReport.monthKey);
+    setDraftReport(null);
+  };
+
   const updateRow = (reportId, rowId, key, value) => {
     if (!selectedCard) return;
 
-    setReportsByCard((prev) => ({
-      ...prev,
-      [selectedCard.id]: (prev[selectedCard.id] || []).map((report) =>
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).map((report) =>
         report.id !== reportId
           ? report
           : {
@@ -250,8 +337,175 @@ function App() {
                 row.id === rowId ? { ...row, [key]: value } : row,
               ),
             },
-      ),
-    }));
+      );
+      persistReports(selectedCard.id, updated);
+      return {
+        ...prev,
+        [selectedCard.id]: updated,
+      };
+    });
+  };
+
+  const updateReport = (reportId, updater) => {
+    if (!selectedCard) return;
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).map((report) =>
+        report.id === reportId ? updater(report) : report,
+      );
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
+    });
+  };
+
+  const deleteReport = (reportId) => {
+    if (!selectedCard) return;
+    setReportsByCard((prev) => {
+      const updated = (prev[selectedCard.id] || []).filter((report) => report.id !== reportId);
+      persistReports(selectedCard.id, updated);
+      return { ...prev, [selectedCard.id]: updated };
+    });
+  };
+
+  const closeReport = (reportId) => {
+    updateReport(reportId, (report) => ({ ...report, closed: true }));
+  };
+
+  const saveReport = (reportId) => {
+    updateReport(reportId, (report) => ({ ...report, savedAt: new Date().toISOString() }));
+  };
+
+  const handleAttachmentChange = async (reportId, rowId, file) => {
+    if (!file) {
+      updateRow(reportId, rowId, "attachment", null);
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file);
+    updateRow(reportId, rowId, "attachment", {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+    });
+  };
+
+  const removeAttachment = (reportId, rowId) => {
+    updateRow(reportId, rowId, "attachment", null);
+  };
+
+  const renderAttachmentPreview = async (attachment) => {
+    if (!attachment?.dataUrl) return null;
+
+    if (attachment.type?.startsWith("image/")) {
+      const format = attachment.type.includes("png") ? "PNG" : "JPEG";
+      return { kind: "image", dataUrl: attachment.dataUrl, format };
+    }
+
+    if (attachment.type === "application/pdf") {
+      try {
+        const pdfjs = await loadPdfJs();
+        const loadingTask = pdfjs.getDocument({ data: dataUrlToUint8Array(attachment.dataUrl) });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.2 });
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: context, viewport }).promise;
+        return { kind: "image", dataUrl: canvas.toDataURL("image/jpeg", 0.88), format: "JPEG" };
+      } catch {
+        return { kind: "pdf", filename: attachment.name };
+      }
+    }
+
+    return { kind: "unsupported", filename: attachment.name };
+  };
+
+  const appendAttachmentsSection = async (doc, rowsWithAttachments) => {
+    if (rowsWithAttachments.length === 0) return;
+
+    const pageWidth = 595;
+    const slotX = 30;
+    const slotWidth = pageWidth - slotX * 2;
+    const slotHeight = 340;
+    const slotsY = [70, 430];
+
+    for (let i = 0; i < rowsWithAttachments.length; i += 2) {
+      doc.addPage("a4", "portrait");
+      doc.setFillColor(255, 122, 26);
+      doc.rect(0, 0, pageWidth, 44, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(12);
+      doc.text("NS-ITALSEM · Allegati nota spese", 24, 28);
+      doc.setTextColor(40, 40, 40);
+
+      for (let slotIndex = 0; slotIndex < 2; slotIndex += 1) {
+        const row = rowsWithAttachments[i + slotIndex];
+        if (!row) break;
+
+        const slotY = slotsY[slotIndex];
+        const preview = await renderAttachmentPreview(row.attachment);
+
+        doc.setDrawColor(210, 210, 210);
+        doc.roundedRect(slotX, slotY, slotWidth, slotHeight, 6, 6);
+        doc.setFontSize(10);
+        doc.text(
+          `${formatDate(row.date)} · ${row.category || "SENZA CATEGORIA"} · ${formatAmount(row.amount)}`,
+          slotX + 12,
+          slotY + 18,
+        );
+        doc.text(`File: ${row.attachment?.name || "-"}`, slotX + 12, slotY + 34);
+
+        if (preview?.kind === "image") {
+          const availableWidth = slotWidth - 24;
+          const availableHeight = slotHeight - 58;
+          const imageProperties = doc.getImageProperties(preview.dataUrl);
+
+          const normalScale = Math.min(
+            availableWidth / imageProperties.width,
+            availableHeight / imageProperties.height,
+          );
+          const rotatedScale = Math.min(
+            availableWidth / imageProperties.height,
+            availableHeight / imageProperties.width,
+          );
+          const useRotation = rotatedScale > normalScale * 1.08;
+
+          const drawWidth = useRotation
+            ? imageProperties.height * rotatedScale
+            : imageProperties.width * normalScale;
+          const drawHeight = useRotation
+            ? imageProperties.width * rotatedScale
+            : imageProperties.height * normalScale;
+
+          const centerX = slotX + 12 + availableWidth / 2;
+          const centerY = slotY + 46 + availableHeight / 2;
+          const drawX = centerX - drawWidth / 2;
+          const drawY = centerY - drawHeight / 2;
+
+          doc.addImage(
+            preview.dataUrl,
+            preview.format,
+            drawX,
+            drawY,
+            drawWidth,
+            drawHeight,
+            undefined,
+            "FAST",
+            useRotation ? 90 : 0,
+          );
+        } else {
+          doc.setFontSize(11);
+          doc.text(
+            preview?.kind === "pdf"
+              ? "Anteprima PDF non disponibile: file allegato registrato nel report"
+              : "Formato allegato non supportato in anteprima",
+            slotX + 12,
+            slotY + 62,
+          );
+        }
+      }
+    }
   };
 
   const monthlyHistory = useMemo(() => {
@@ -264,13 +518,19 @@ function App() {
         .filter((row) => row.amount < 0)
         .reduce((sum, row) => sum + row.amount, 0);
 
-      const existing = acc.find((item) => item.month === report.month);
+      const existing = acc.find((item) => item.monthKey === report.monthKey);
       if (existing) {
         existing.reports += 1;
         existing.total += total;
         existing.expenses += expenseOnly;
       } else {
-        acc.push({ month: report.month, reports: 1, total, expenses: expenseOnly });
+        acc.push({
+          monthKey: report.monthKey,
+          monthLabel: report.monthLabel,
+          reports: 1,
+          total,
+          expenses: expenseOnly,
+        });
       }
       return acc;
     }, []);
@@ -280,11 +540,14 @@ function App() {
     if (!selectedCard) return [];
     const reports = reportsByCard[selectedCard.id] || [];
     if (selectedMonth === "all") return reports;
-    return reports.filter((report) => report.month === selectedMonth);
+    return reports.filter((report) => report.monthKey === selectedMonth);
   }, [reportsByCard, selectedCard, selectedMonth]);
 
   const rowsForCurrentFilter = useMemo(
-    () => visibleReports.flatMap((report) => report.rows.map((row) => ({ ...row, month: report.month }))),
+    () =>
+      visibleReports.flatMap((report) =>
+        report.rows.map((row) => ({ ...row, month: report.monthLabel, monthKey: report.monthKey })),
+      ),
     [visibleReports],
   );
 
@@ -296,54 +559,140 @@ function App() {
   const openingBalance = parseAmount(openingBalanceByMonth[selectedMonth] || 0);
   const closingBalance = openingBalance + totalAll;
 
-  const exportSummaryPdf = () => {
+  const exportSummaryPdf = async () => {
     if (!selectedCard) return;
+    const [{ jsPDF }, autoTableModule] = await loadPdfTools();
+    const autoTable = autoTableModule.default;
+    const logo = await loadLogoDataUrl();
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
 
-    const lines = [
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 842, 56, "F");
+    doc.addImage(logo, "PNG", 24, 10, 140, 36);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("NS-ITALSEM · Riepilogo Totale Nota Spese", 190, 34);
+    doc.setTextColor(40, 40, 40);
+
+    const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
       `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale movimenti (incluse ricariche): ${formatAmount(totalAll)}`,
+      `Totale movimenti: ${formatAmount(totalAll)}`,
       `Saldo finale: ${formatAmount(closingBalance)}`,
-      "",
-      "Dettaglio:",
     ];
 
-    rowsForCurrentFilter.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.cardLabel || "-"} | ${row.movement || "-"} | ${
-          row.category || "-"
-        } | ${row.detailDescription || "-"} | ${formatAmount(row.amount)}`,
-      );
+    doc.setFontSize(10);
+    subtitleLines.forEach((line, index) => doc.text(line, 24, 78 + index * 14));
+
+    const body = rowsForCurrentFilter.map((row) => [
+        formatDate(row.date),
+        row.month || "-",
+        row.cardLabel || "-",
+        row.movement || "-",
+        row.category || "-",
+        row.detailDescription || "-",
+        formatAmount(row.amount),
+        row.attachment?.name || "-",
+      ]);
+
+    autoTable(doc, {
+      startY: 160,
+      head: [["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"]],
+      body,
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [255, 122, 26], textColor: [255, 255, 255], fontStyle: "bold" },
+      columnStyles: {
+        0: { cellWidth: 58 },
+        1: { cellWidth: 78 },
+        2: { cellWidth: 64 },
+        3: { cellWidth: 150 },
+        4: { cellWidth: 92 },
+        5: { cellWidth: 150 },
+        6: { cellWidth: 70, halign: "right" },
+        7: { cellWidth: 90 },
+      },
+      margin: { left: 24, right: 24 },
+      didDrawPage: () => {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        doc.setTextColor(120, 120, 120);
+        doc.setFontSize(8);
+        doc.text(`Generato da NS-ITALSEM · ${new Date().toLocaleString("it-IT")}`, 24, pageHeight - 16);
+        doc.setTextColor(40, 40, 40);
+      },
     });
 
-    const blob = buildPdfBlob("Riepilogo nota spese", lines);
-    downloadBlob(blob, `riepilogo-${selectedCard.card_last4}.pdf`);
+    const rowsWithAttachments = rowsForCurrentFilter.filter((row) => row.attachment?.dataUrl);
+    await appendAttachmentsSection(doc, rowsWithAttachments);
+
+    doc.save(`riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
-  const exportExpensesPdf = () => {
+  const exportExpensesPdf = async () => {
     if (!selectedCard) return;
+    const [{ jsPDF }, autoTableModule] = await loadPdfTools();
+    const autoTable = autoTableModule.default;
+    const logo = await loadLogoDataUrl();
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 595, 56, "F");
+    doc.addImage(logo, "PNG", 24, 10, 140, 36);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("NS-ITALSEM · Export Sole Spese", 190, 34);
+    doc.setTextColor(40, 40, 40);
 
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
-    const lines = [
+    const totalsByCategory = expenseRows.reduce((acc, row) => {
+      const key = row.category || "SENZA CATEGORIA";
+      acc[key] = (acc[key] || 0) + Math.abs(row.amount);
+      return acc;
+    }, {});
+
+    const categoryBody = Object.entries(totalsByCategory)
+      .sort((a, b) => b[1] - a[1])
+      .map(([category, total]) => [`Totale ${category}`, formatAmount(-Math.abs(total))]);
+
+    categoryBody.push(["GRAN TOTALE SPESE", formatAmount(totalExpenses)]);
+    const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
-      `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale sole spese (solo importi negativi): ${formatAmount(totalExpenses)}`,
-      "",
-      "Dettaglio categorie spese:",
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
+      `Totale sole spese: ${formatAmount(totalExpenses)}`,
     ];
 
-    expenseRows.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.category || "SENZA CATEGORIA"} | ${formatAmount(
-          row.amount,
-        )}`,
-      );
+    doc.setFontSize(10);
+    subtitleLines.forEach((line, index) => doc.text(line, 24, 78 + index * 14));
+
+    autoTable(doc, {
+      startY: 140,
+      head: [["Riepilogo verticale sole spese", "Importo"]],
+      body: categoryBody,
+      theme: "grid",
+      styles: { fontSize: 10, cellPadding: 6, overflow: "linebreak" },
+      headStyles: { fillColor: [255, 122, 26], textColor: [255, 255, 255], fontStyle: "bold" },
+      columnStyles: {
+        0: { cellWidth: 380 },
+        1: { cellWidth: 140, halign: "right" },
+      },
+      margin: { left: 24, right: 24 },
+      didParseCell: (data) => {
+        if (data.row.index === categoryBody.length - 1) {
+          data.cell.styles.fillColor = [255, 243, 232];
+          data.cell.styles.fontStyle = "bold";
+        }
+      },
+      didDrawPage: () => {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        doc.setTextColor(120, 120, 120);
+        doc.setFontSize(8);
+        doc.text(`Generato da NS-ITALSEM · ${new Date().toLocaleString("it-IT")}`, 24, pageHeight - 16);
+        doc.setTextColor(40, 40, 40);
+      },
     });
 
-    const blob = buildPdfBlob("Export sole spese", lines);
-    downloadBlob(blob, `sole-spese-${selectedCard.card_last4}.pdf`);
+    doc.save(`sole-spese-${selectedCard.card_last4}.pdf`);
   };
 
   if (selectedCard) {
@@ -369,8 +718,16 @@ function App() {
           <aside className="history-panel">
             <h3>Storico note spese</h3>
             <button type="button" className="accent" onClick={() => fileInputRef.current?.click()}>
-              + Aggiungi nota spesa (.xlsx)
+              Importa movimenti (.xlsx)
             </button>
+            <label className="month-picker">
+              Mese nota spese
+              <input
+                type="month"
+                value={reportMonthInput}
+                onChange={(e) => setReportMonthInput(e.target.value)}
+              />
+            </label>
             <input
               ref={fileInputRef}
               type="file"
@@ -388,12 +745,12 @@ function App() {
             </button>
             {monthlyHistory.map((item) => (
               <button
-                key={item.month}
+                key={item.monthKey}
                 type="button"
-                className={selectedMonth === item.month ? "month active" : "month"}
-                onClick={() => setSelectedMonth(item.month)}
+                className={selectedMonth === item.monthKey ? "month active" : "month"}
+                onClick={() => setSelectedMonth(item.monthKey)}
               >
-                <span>{item.month}</span>
+                <span>{item.monthLabel}</span>
                 <small>
                   {item.reports} note · Tot {formatAmount(item.total)} · Spese {formatAmount(item.expenses)}
                 </small>
@@ -435,6 +792,15 @@ function App() {
 
             {importError && <p className="error-box">{importError}</p>}
 
+            {draftReport && (
+              <div className="draft-box">
+                <strong>Bozza pronta: {draftReport.monthLabel}</strong>
+                <button type="button" className="accent" onClick={saveDraftReport}>
+                  Salva nota spese
+                </button>
+              </div>
+            )}
+
             {visibleReports.length === 0 ? (
               <p className="empty-state">
                 Nessuna nota spese per questo filtro. Carica un file Excel con intestazioni:
@@ -444,8 +810,13 @@ function App() {
               visibleReports.map((report) => (
                 <div key={report.id} className="report-box">
                   <div className="report-head">
-                    <strong>{report.month}</strong>
+                    <strong>{report.monthLabel}</strong>
                     <span>Caricata il {formatDate(report.createdAt)}</span>
+                    <div className="header-actions">
+                      <button type="button" className="danger" onClick={() => deleteReport(report.id)}>
+                        Elimina nota spesa
+                      </button>
+                    </div>
                   </div>
 
                   <div className="expense-table">
@@ -467,6 +838,7 @@ function App() {
                         <span>{formatAmount(row.amount)}</span>
                         <select
                           value={row.category}
+                          disabled={report.closed}
                           onChange={(e) => updateRow(report.id, row.id, "category", e.target.value)}
                         >
                           <option value="">Seleziona categoria</option>
@@ -479,6 +851,7 @@ function App() {
                         <input
                           type="text"
                           value={row.detailDescription}
+                          disabled={report.closed}
                           onChange={(e) =>
                             updateRow(report.id, row.id, "detailDescription", e.target.value)
                           }
@@ -487,17 +860,36 @@ function App() {
                         <input
                           type="file"
                           accept=".pdf,.jpg,.jpeg,.png"
-                          onChange={(e) =>
-                            updateRow(
-                              report.id,
-                              row.id,
-                              "attachment",
-                              e.target.files?.[0]?.name || "",
-                            )
-                          }
+                          disabled={report.closed}
+                          onChange={(e) => handleAttachmentChange(report.id, row.id, e.target.files?.[0])}
                         />
+                        {row.attachment?.name && <small>{row.attachment.name}</small>}
+                        {row.attachment && (
+                          <button
+                            type="button"
+                            className="danger inline-danger"
+                            disabled={report.closed}
+                            onClick={() => removeAttachment(report.id, row.id)}
+                          >
+                            Elimina allegato
+                          </button>
+                        )}
                       </div>
                     ))}
+                  </div>
+
+                  <div className="report-actions">
+                    <button type="button" className="accent" onClick={() => saveReport(report.id)}>
+                      Salva nota spesa
+                    </button>
+                    <button
+                      type="button"
+                      className="accent"
+                      onClick={() => closeReport(report.id)}
+                      disabled={report.closed}
+                    >
+                      {report.closed ? "Nota spesa chiusa" : "Chiudi nota spesa"}
+                    </button>
                   </div>
                 </div>
               ))
@@ -514,7 +906,6 @@ function App() {
         <img src="/logo-italsem.png" alt="Logo Italsem" className="brand-logo" />
         <div className="title-group">
           <h1>Dashboard Note Spese</h1>
-          <p>Massimo 4 carte per colonna</p>
         </div>
       </header>
 
@@ -537,7 +928,7 @@ function App() {
           </div>
         </section>
 
-        <section className="grid four-per-column">
+        <section className="grid four-per-row">
           {cards.map((card) => (
             <button
               key={card.id}
