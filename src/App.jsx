@@ -16,7 +16,10 @@ const formatDate = (value) => {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("it-IT");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 };
 
 const formatAmount = (value) => {
@@ -45,10 +48,20 @@ const parseDate = (raw) => {
   if (raw instanceof Date) return raw.toISOString();
   if (!raw) return new Date().toISOString();
 
+  if (typeof raw === "number") {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const date = new Date(excelEpoch.getTime() + raw * 24 * 60 * 60 * 1000);
+    return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  }
+
   const text = String(raw).trim();
-  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
   if (slash) {
-    return new Date(`${slash[3]}-${slash[2]}-${slash[1]}T00:00:00`).toISOString();
+    const day = Number(slash[1]);
+    const month = Number(slash[2]);
+    const yearToken = Number(slash[3]);
+    const year = slash[3].length === 2 ? 2000 + yearToken : yearToken;
+    return new Date(year, month - 1, day).toISOString();
   }
 
   const date = new Date(text);
@@ -56,17 +69,31 @@ const parseDate = (raw) => {
   return new Date().toISOString();
 };
 
-const monthFromDate = (value) => {
+const monthLabelFromIsoDate = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "mese non valido";
   return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
 };
 
-const monthStartLabel = (monthLabel) => {
-  if (!monthLabel || monthLabel === "all") return "01/01/2026";
-  const date = new Date(`01 ${monthLabel}`);
-  if (Number.isNaN(date.getTime())) return "01/01/2026";
-  return new Date(date.getFullYear(), date.getMonth(), 1).toLocaleDateString("it-IT");
+const monthLabelFromKey = (value) => {
+  if (!value) return "";
+  const [year, month] = value.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
+};
+
+const monthKeyFromIsoDate = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const monthStartLabel = (monthKey) => {
+  if (!monthKey || monthKey === "all") return "-";
+  const [year, month] = monthKey.split("-");
+  if (!year || !month) return "-";
+  return `01/${month}/${year}`;
 };
 
 let xlsxLoader = null;
@@ -77,24 +104,24 @@ const loadXlsx = async () => {
   return xlsxLoader;
 };
 
-const buildPdfBlob = (title, lines) => {
+const buildPdfBlob = (title, subtitleLines, headers, rows) => {
   const escapeText = (text) =>
     String(text)
       .replace(/\\/g, "\\\\")
       .replace(/\(/g, "\\(")
       .replace(/\)/g, "\\)");
 
-  const content = [title, "", ...lines].map((line, index) => {
-    const y = 800 - index * 16;
-    return `BT /F1 10 Tf 40 ${y} Td (${escapeText(line)}) Tj ET`;
+  const lines = [title, ...subtitleLines, "", headers.join(" | "), ...rows.map((row) => row.join(" | "))];
+  const content = lines.map((line, index) => {
+    const y = 800 - index * 14;
+    return `BT /F1 9 Tf 30 ${y} Td (${escapeText(line)}) Tj ET`;
   });
 
   const stream = content.join("\n");
-
   const objects = [
     "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
     "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
-    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
+    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
     "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
     `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
   ];
@@ -111,7 +138,6 @@ const buildPdfBlob = (title, lines) => {
     pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   });
   pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
-
   return new Blob([pdf], { type: "application/pdf" });
 };
 
@@ -120,9 +146,12 @@ const downloadBlob = (blob, fileName) => {
   const a = document.createElement("a");
   a.href = url;
   a.download = fileName;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
 
 function App() {
   const [cards, setCards] = useState([]);
@@ -132,6 +161,8 @@ function App() {
   const [reportsByCard, setReportsByCard] = useState({});
   const [selectedMonth, setSelectedMonth] = useState("all");
   const [importError, setImportError] = useState("");
+  const [reportMonthInput, setReportMonthInput] = useState("");
+  const [draftReport, setDraftReport] = useState(null);
   const [openingBalanceByMonth, setOpeningBalanceByMonth] = useState({});
   const fileInputRef = useRef(null);
 
@@ -185,7 +216,7 @@ function App() {
     if (!firstSheetName) return [];
 
     const sheet = workbook.Sheets[firstSheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
     return rows.map((entry, index) => {
       const date = parseDate(entry["Data operazione"]);
@@ -201,7 +232,7 @@ function App() {
         amount,
         category: "",
         detailDescription: "",
-        attachment: "",
+        attachment: null,
       };
     });
   };
@@ -214,19 +245,15 @@ function App() {
       setImportError("");
       const rows = await parseWorkbook(file);
       const reportDate = rows[0]?.date || new Date().toISOString();
+      const monthKey = reportMonthInput || monthKeyFromIsoDate(reportDate);
       const report = {
         id: `${Date.now()}`,
         createdAt: new Date().toISOString(),
-        month: monthFromDate(reportDate),
+        monthKey,
+        monthLabel: monthLabelFromKey(monthKey) || monthLabelFromIsoDate(reportDate),
         rows,
       };
-
-      setReportsByCard((prev) => {
-        const current = prev[selectedCard.id] || [];
-        return { ...prev, [selectedCard.id]: [report, ...current] };
-      });
-
-      setSelectedMonth(report.month);
+      setDraftReport(report);
     } catch {
       setImportError(
         "Import non riuscito. Il file deve avere le colonne: Data operazione, Carta, Descrizione, Importo in euro.",
@@ -234,6 +261,16 @@ function App() {
     } finally {
       event.target.value = "";
     }
+  };
+
+  const saveDraftReport = () => {
+    if (!selectedCard || !draftReport) return;
+    setReportsByCard((prev) => {
+      const current = prev[selectedCard.id] || [];
+      return { ...prev, [selectedCard.id]: [draftReport, ...current] };
+    });
+    setSelectedMonth(draftReport.monthKey);
+    setDraftReport(null);
   };
 
   const updateRow = (reportId, rowId, key, value) => {
@@ -264,13 +301,19 @@ function App() {
         .filter((row) => row.amount < 0)
         .reduce((sum, row) => sum + row.amount, 0);
 
-      const existing = acc.find((item) => item.month === report.month);
+      const existing = acc.find((item) => item.monthKey === report.monthKey);
       if (existing) {
         existing.reports += 1;
         existing.total += total;
         existing.expenses += expenseOnly;
       } else {
-        acc.push({ month: report.month, reports: 1, total, expenses: expenseOnly });
+        acc.push({
+          monthKey: report.monthKey,
+          monthLabel: report.monthLabel,
+          reports: 1,
+          total,
+          expenses: expenseOnly,
+        });
       }
       return acc;
     }, []);
@@ -280,11 +323,14 @@ function App() {
     if (!selectedCard) return [];
     const reports = reportsByCard[selectedCard.id] || [];
     if (selectedMonth === "all") return reports;
-    return reports.filter((report) => report.month === selectedMonth);
+    return reports.filter((report) => report.monthKey === selectedMonth);
   }, [reportsByCard, selectedCard, selectedMonth]);
 
   const rowsForCurrentFilter = useMemo(
-    () => visibleReports.flatMap((report) => report.rows.map((row) => ({ ...row, month: report.month }))),
+    () =>
+      visibleReports.flatMap((report) =>
+        report.rows.map((row) => ({ ...row, month: report.monthLabel, monthKey: report.monthKey })),
+      ),
     [visibleReports],
   );
 
@@ -296,53 +342,47 @@ function App() {
   const openingBalance = parseAmount(openingBalanceByMonth[selectedMonth] || 0);
   const closingBalance = openingBalance + totalAll;
 
-  const exportSummaryPdf = () => {
+  const exportSummaryPdf = async () => {
     if (!selectedCard) return;
-
-    const lines = [
+    const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
       `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale movimenti (incluse ricariche): ${formatAmount(totalAll)}`,
+      `Totale movimenti: ${formatAmount(totalAll)}`,
       `Saldo finale: ${formatAmount(closingBalance)}`,
-      "",
-      "Dettaglio:",
     ];
-
-    rowsForCurrentFilter.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.cardLabel || "-"} | ${row.movement || "-"} | ${
-          row.category || "-"
-        } | ${row.detailDescription || "-"} | ${formatAmount(row.amount)}`,
-      );
-    });
-
-    const blob = buildPdfBlob("Riepilogo nota spese", lines);
+    const headers = ["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"];
+    const body = rowsForCurrentFilter.map((row) => [
+        formatDate(row.date),
+        row.month || "-",
+        row.cardLabel || "-",
+        row.movement || "-",
+        row.category || "-",
+        row.detailDescription || "-",
+        formatAmount(row.amount),
+        row.attachment?.name || "-",
+      ]);
+    const blob = buildPdfBlob("Riepilogo Totale Nota Spese", subtitleLines, headers, body);
     downloadBlob(blob, `riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
-  const exportExpensesPdf = () => {
+  const exportExpensesPdf = async () => {
     if (!selectedCard) return;
-
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
-    const lines = [
+    const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
-      `Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`,
-      `Saldo iniziale: ${formatAmount(openingBalance)}`,
-      `Totale sole spese (solo importi negativi): ${formatAmount(totalExpenses)}`,
-      "",
-      "Dettaglio categorie spese:",
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
+      `Totale sole spese: ${formatAmount(totalExpenses)}`,
     ];
-
-    expenseRows.forEach((row) => {
-      lines.push(
-        `${formatDate(row.date)} | ${row.category || "SENZA CATEGORIA"} | ${formatAmount(
-          row.amount,
-        )}`,
-      );
-    });
-
-    const blob = buildPdfBlob("Export sole spese", lines);
+    const headers = ["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"];
+    const body = expenseRows.map((row) => [
+        formatDate(row.date),
+        row.month || "-",
+        row.category || "SENZA CATEGORIA",
+        row.detailDescription || "-",
+        formatAmount(row.amount),
+      ]);
+    const blob = buildPdfBlob("Export Sole Spese", subtitleLines, headers, body);
     downloadBlob(blob, `sole-spese-${selectedCard.card_last4}.pdf`);
   };
 
@@ -369,8 +409,16 @@ function App() {
           <aside className="history-panel">
             <h3>Storico note spese</h3>
             <button type="button" className="accent" onClick={() => fileInputRef.current?.click()}>
-              + Aggiungi nota spesa (.xlsx)
+              Importa movimenti (.xlsx)
             </button>
+            <label className="month-picker">
+              Mese nota spese
+              <input
+                type="month"
+                value={reportMonthInput}
+                onChange={(e) => setReportMonthInput(e.target.value)}
+              />
+            </label>
             <input
               ref={fileInputRef}
               type="file"
@@ -388,12 +436,12 @@ function App() {
             </button>
             {monthlyHistory.map((item) => (
               <button
-                key={item.month}
+                key={item.monthKey}
                 type="button"
-                className={selectedMonth === item.month ? "month active" : "month"}
-                onClick={() => setSelectedMonth(item.month)}
+                className={selectedMonth === item.monthKey ? "month active" : "month"}
+                onClick={() => setSelectedMonth(item.monthKey)}
               >
-                <span>{item.month}</span>
+                <span>{item.monthLabel}</span>
                 <small>
                   {item.reports} note · Tot {formatAmount(item.total)} · Spese {formatAmount(item.expenses)}
                 </small>
@@ -435,6 +483,15 @@ function App() {
 
             {importError && <p className="error-box">{importError}</p>}
 
+            {draftReport && (
+              <div className="draft-box">
+                <strong>Bozza pronta: {draftReport.monthLabel}</strong>
+                <button type="button" className="accent" onClick={saveDraftReport}>
+                  Salva nota spese
+                </button>
+              </div>
+            )}
+
             {visibleReports.length === 0 ? (
               <p className="empty-state">
                 Nessuna nota spese per questo filtro. Carica un file Excel con intestazioni:
@@ -444,7 +501,7 @@ function App() {
               visibleReports.map((report) => (
                 <div key={report.id} className="report-box">
                   <div className="report-head">
-                    <strong>{report.month}</strong>
+                    <strong>{report.monthLabel}</strong>
                     <span>Caricata il {formatDate(report.createdAt)}</span>
                   </div>
 
@@ -492,10 +549,16 @@ function App() {
                               report.id,
                               row.id,
                               "attachment",
-                              e.target.files?.[0]?.name || "",
+                              e.target.files?.[0]
+                                ? {
+                                    name: e.target.files[0].name,
+                                    type: e.target.files[0].type,
+                                  }
+                                : null,
                             )
                           }
                         />
+                        {row.attachment?.name && <small>{row.attachment.name}</small>}
                       </div>
                     ))}
                   </div>
@@ -514,7 +577,6 @@ function App() {
         <img src="/logo-italsem.png" alt="Logo Italsem" className="brand-logo" />
         <div className="title-group">
           <h1>Dashboard Note Spese</h1>
-          <p>Massimo 4 carte per colonna</p>
         </div>
       </header>
 
@@ -537,7 +599,7 @@ function App() {
           </div>
         </section>
 
-        <section className="grid four-per-column">
+        <section className="grid four-per-row">
           {cards.map((card) => (
             <button
               key={card.id}
