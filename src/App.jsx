@@ -97,7 +97,7 @@ const monthStartLabel = (monthKey) => {
 };
 
 let xlsxLoader = null;
-let pdfLoader = null;
+let pdfToolsLoader = null;
 const loadXlsx = async () => {
   if (!xlsxLoader) {
     xlsxLoader = import("https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs");
@@ -105,104 +105,28 @@ const loadXlsx = async () => {
   return xlsxLoader;
 };
 
-const buildPdfBlob = (title, subtitleLines, headers, rows) => {
-  const escapeText = (text) =>
-    String(text)
-      .replace(/\\/g, "\\\\")
-      .replace(/\(/g, "\\(")
-      .replace(/\)/g, "\\)")
-      .replace(/€/g, "\\200");
-
-  const fitCell = (value, width) => {
-    const text = String(value || "-");
-    if (text.length >= width) return `${text.slice(0, Math.max(0, width - 1))}…`;
-    return text.padEnd(width, " ");
-  };
-
-  const widths = [10, 14, 10, 26, 20, 22, 12, 16];
-  const tableHeader = headers.map((h, i) => fitCell(h, widths[i] || 12)).join(" ");
-  const tableRows = rows.map((row) => row.map((cell, i) => fitCell(cell, widths[i] || 12)).join(" "));
-
-  const lineHeight = 13;
-  const topY = 812;
-  const bottomY = 36;
-  const linesPerPage = Math.floor((topY - bottomY) / lineHeight);
-  const allLines = [
-    "ITALSEM",
-    title,
-    ...subtitleLines,
-    "",
-    tableHeader,
-    ...tableRows,
-  ];
-
-  const pages = [];
-  for (let i = 0; i < allLines.length; i += linesPerPage) {
-    pages.push(allLines.slice(i, i + linesPerPage));
+const loadPdfTools = async () => {
+  if (!pdfToolsLoader) {
+    pdfToolsLoader = Promise.all([
+      import("https://esm.sh/jspdf@2.5.1"),
+      import("https://esm.sh/jspdf-autotable@3.8.2"),
+    ]);
   }
-
-  const objects = [];
-  const addObject = (content) => {
-    objects.push(content);
-    return objects.length;
-  };
-
-  const catalogId = addObject('<< /Type /Catalog /Pages 2 0 R >>');
-  addObject('<< /Type /Pages /Kids [] /Count 0 >>');
-  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-
-  const pageIds = [];
-
-  pages.forEach((pageLines, pageIndex) => {
-    const contentLines = [];
-    contentLines.push("1 0.48 0.1 rg");
-    contentLines.push("0 820 842 22 re f");
-    contentLines.push("0 0 0 rg");
-    pageLines.forEach((line, lineIndex) => {
-      const y = topY - lineIndex * lineHeight;
-      const fontSize = lineIndex === 1 ? 12 : 9;
-      contentLines.push(`BT /F1 ${fontSize} Tf 30 ${y} Td (${escapeText(line)}) Tj ET`);
-    });
-    contentLines.push("1 0.48 0.1 rg");
-    contentLines.push("30 802 782 1 re f");
-    contentLines.push("0 0 0 rg");
-    contentLines.push(`BT /F1 8 Tf 730 20 Td (pag. ${pageIndex + 1}/${pages.length}) Tj ET`);
-
-    const stream = contentLines.join("\n");
-    const contentId = addObject(`<< /Length ${stream.length} >> stream\n${stream}\nendstream`);
-    const pageId = addObject(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
-    );
-    pageIds.push(pageId);
-  });
-
-  objects[1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
-
-  let pdf = "%PDF-1.4\n";
-  const xref = [0];
-  objects.forEach((obj, index) => {
-    xref.push(pdf.length);
-    pdf += `${index + 1} 0 obj ${obj} endobj\n`;
-  });
-  const xrefStart = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  xref.slice(1).forEach((offset) => {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  });
-  pdf += `trailer << /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
-  return new Blob([pdf], { type: "application/pdf" });
+  return pdfToolsLoader;
 };
 
-const downloadBlob = (blob, fileName) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+const loadLogoDataUrl = async () => {
+  const res = await fetch("/logo-italsem.png");
+  const blob = await res.blob();
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
 };
+
+const reportStorageKey = (cardId) => `expense-reports-${cardId}`;
+
 
 
 function App() {
@@ -231,21 +155,44 @@ function App() {
   useEffect(() => {
     const loadReports = async () => {
       if (!selectedCard) return;
-      const res = await fetch(`/api/reports?cardId=${selectedCard.id}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: data.reports || [] }));
+
+      let localReports = [];
+      try {
+        const raw = localStorage.getItem(reportStorageKey(selectedCard.id));
+        localReports = raw ? JSON.parse(raw) : [];
+      } catch {
+        localReports = [];
+      }
+
+      setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: localReports }));
+
+      try {
+        const res = await fetch(`/api/reports?cardId=${selectedCard.id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const apiReports = data.reports || [];
+        const finalReports = apiReports.length > 0 ? apiReports : localReports;
+        localStorage.setItem(reportStorageKey(selectedCard.id), JSON.stringify(finalReports));
+        setReportsByCard((prev) => ({ ...prev, [selectedCard.id]: finalReports }));
+      } catch {
+        // fallback locale già applicato
+      }
     };
 
     loadReports();
   }, [selectedCard]);
 
   const persistReports = async (cardId, reports) => {
-    await fetch("/api/reports", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cardId, reports }),
-    });
+    localStorage.setItem(reportStorageKey(cardId), JSON.stringify(reports));
+    try {
+      await fetch("/api/reports", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cardId, reports }),
+      });
+    } catch {
+      // già salvato in locale
+    }
   };
 
   const createCard = async () => {
@@ -276,6 +223,8 @@ function App() {
       delete next[selectedCard.id];
       return next;
     });
+
+    localStorage.removeItem(reportStorageKey(selectedCard.id));
 
     setSelectedCard(null);
     loadCards();
@@ -422,6 +371,19 @@ function App() {
 
   const exportSummaryPdf = async () => {
     if (!selectedCard) return;
+    const [{ jsPDF }, autoTableModule] = await loadPdfTools();
+    const autoTable = autoTableModule.default;
+    const logo = await loadLogoDataUrl();
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 842, 56, "F");
+    doc.addImage(logo, "PNG", 24, 10, 140, 36);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("NS-ITALSEM · Riepilogo Totale Nota Spese", 190, 34);
+    doc.setTextColor(40, 40, 40);
+
     const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
       `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
@@ -429,7 +391,10 @@ function App() {
       `Totale movimenti: ${formatAmount(totalAll)}`,
       `Saldo finale: ${formatAmount(closingBalance)}`,
     ];
-    const headers = ["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"];
+
+    doc.setFontSize(10);
+    subtitleLines.forEach((line, index) => doc.text(line, 24, 78 + index * 14));
+
     const body = rowsForCurrentFilter.map((row) => [
         formatDate(row.date),
         row.month || "-",
@@ -440,19 +405,62 @@ function App() {
         formatAmount(row.amount),
         row.attachment?.name || "-",
       ]);
-    const blob = buildPdfBlob("Riepilogo Totale Nota Spese", subtitleLines, headers, body);
-    downloadBlob(blob, `riepilogo-${selectedCard.card_last4}.pdf`);
+
+    autoTable(doc, {
+      startY: 160,
+      head: [["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"]],
+      body,
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [255, 122, 26], textColor: [255, 255, 255], fontStyle: "bold" },
+      columnStyles: {
+        0: { cellWidth: 58 },
+        1: { cellWidth: 78 },
+        2: { cellWidth: 64 },
+        3: { cellWidth: 150 },
+        4: { cellWidth: 92 },
+        5: { cellWidth: 150 },
+        6: { cellWidth: 70, halign: "right" },
+        7: { cellWidth: 90 },
+      },
+      margin: { left: 24, right: 24 },
+      didDrawPage: () => {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        doc.setTextColor(120, 120, 120);
+        doc.setFontSize(8);
+        doc.text(`Generato da NS-ITALSEM · ${new Date().toLocaleString("it-IT")}`, 24, pageHeight - 16);
+        doc.setTextColor(40, 40, 40);
+      },
+    });
+
+    doc.save(`riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
   const exportExpensesPdf = async () => {
     if (!selectedCard) return;
+    const [{ jsPDF }, autoTableModule] = await loadPdfTools();
+    const autoTable = autoTableModule.default;
+    const logo = await loadLogoDataUrl();
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+
+    doc.setFillColor(255, 122, 26);
+    doc.rect(0, 0, 842, 56, "F");
+    doc.addImage(logo, "PNG", 24, 10, 140, 36);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text("NS-ITALSEM · Export Sole Spese", 190, 34);
+    doc.setTextColor(40, 40, 40);
+
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
     const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
       `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
       `Totale sole spese: ${formatAmount(totalExpenses)}`,
     ];
-    const headers = ["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"];
+
+    doc.setFontSize(10);
+    subtitleLines.forEach((line, index) => doc.text(line, 24, 78 + index * 14));
+
     const body = expenseRows.map((row) => [
         formatDate(row.date),
         row.month || "-",
@@ -460,8 +468,32 @@ function App() {
         row.detailDescription || "-",
         formatAmount(row.amount),
       ]);
-    const blob = buildPdfBlob("Export Sole Spese", subtitleLines, headers, body);
-    downloadBlob(blob, `sole-spese-${selectedCard.card_last4}.pdf`);
+
+    autoTable(doc, {
+      startY: 140,
+      head: [["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"]],
+      body,
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [255, 122, 26], textColor: [255, 255, 255], fontStyle: "bold" },
+      columnStyles: {
+        0: { cellWidth: 70 },
+        1: { cellWidth: 100 },
+        2: { cellWidth: 130 },
+        3: { cellWidth: 430 },
+        4: { cellWidth: 70, halign: "right" },
+      },
+      margin: { left: 24, right: 24 },
+      didDrawPage: () => {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        doc.setTextColor(120, 120, 120);
+        doc.setFontSize(8);
+        doc.text(`Generato da NS-ITALSEM · ${new Date().toLocaleString("it-IT")}`, 24, pageHeight - 16);
+        doc.setTextColor(40, 40, 40);
+      },
+    });
+
+    doc.save(`sole-spese-${selectedCard.card_last4}.pdf`);
   };
 
   if (selectedCard) {
