@@ -48,10 +48,20 @@ const parseDate = (raw) => {
   if (raw instanceof Date) return raw.toISOString();
   if (!raw) return new Date().toISOString();
 
+  if (typeof raw === "number") {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const date = new Date(excelEpoch.getTime() + raw * 24 * 60 * 60 * 1000);
+    return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  }
+
   const text = String(raw).trim();
-  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
   if (slash) {
-    return new Date(`${slash[3]}-${slash[2]}-${slash[1]}T00:00:00`).toISOString();
+    const day = Number(slash[1]);
+    const month = Number(slash[2]);
+    const yearToken = Number(slash[3]);
+    const year = slash[3].length === 2 ? 2000 + yearToken : yearToken;
+    return new Date(year, month - 1, day).toISOString();
   }
 
   const date = new Date(text);
@@ -59,13 +69,13 @@ const parseDate = (raw) => {
   return new Date().toISOString();
 };
 
-const monthFromDate = (value) => {
+const monthLabelFromIsoDate = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "mese non valido";
   return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
 };
 
-const monthLabelFromInput = (value) => {
+const monthLabelFromKey = (value) => {
   if (!value) return "";
   const [year, month] = value.split("-");
   const date = new Date(Number(year), Number(month) - 1, 1);
@@ -73,11 +83,17 @@ const monthLabelFromInput = (value) => {
   return date.toLocaleDateString("it-IT", { month: "long", year: "numeric" });
 };
 
-const monthStartLabel = (monthLabel) => {
-  if (!monthLabel || monthLabel === "all") return "01/01/2026";
-  const date = new Date(`01 ${monthLabel}`);
-  if (Number.isNaN(date.getTime())) return "01/01/2026";
-  return new Date(date.getFullYear(), date.getMonth(), 1).toLocaleDateString("it-IT");
+const monthKeyFromIsoDate = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const monthStartLabel = (monthKey) => {
+  if (!monthKey || monthKey === "all") return "-";
+  const [year, month] = monthKey.split("-");
+  if (!year || !month) return "-";
+  return `01/${month}/${year}`;
 };
 
 let xlsxLoader = null;
@@ -89,24 +105,52 @@ const loadXlsx = async () => {
   return xlsxLoader;
 };
 
-const loadPdfTools = async () => {
-  if (!pdfLoader) {
-    pdfLoader = Promise.all([
-      import("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/+esm"),
-      import("https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/+esm"),
-    ]);
-  }
-  return pdfLoader;
+const buildPdfBlob = (title, subtitleLines, headers, rows) => {
+  const escapeText = (text) =>
+    String(text)
+      .replace(/\\/g, "\\\\")
+      .replace(/\(/g, "\\(")
+      .replace(/\)/g, "\\)");
+
+  const lines = [title, ...subtitleLines, "", headers.join(" | "), ...rows.map((row) => row.join(" | "))];
+  const content = lines.map((line, index) => {
+    const y = 800 - index * 14;
+    return `BT /F1 9 Tf 30 ${y} Td (${escapeText(line)}) Tj ET`;
+  });
+
+  const stream = content.join("\n");
+  const objects = [
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
+    "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+    `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
+  ];
+
+  let pdf = "%PDF-1.4\n";
+  const xref = [0];
+  objects.forEach((obj) => {
+    xref.push(pdf.length);
+    pdf += `${obj}\n`;
+  });
+  const xrefStart = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  xref.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+  return new Blob([pdf], { type: "application/pdf" });
 };
 
-const loadLogoDataUrl = async () => {
-  const res = await fetch("/logo-italsem.png");
-  const blob = await res.blob();
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.readAsDataURL(blob);
-  });
+const downloadBlob = (blob, fileName) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };
 
 
@@ -173,7 +217,7 @@ function App() {
     if (!firstSheetName) return [];
 
     const sheet = workbook.Sheets[firstSheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
     return rows.map((entry, index) => {
       const date = parseDate(entry["Data operazione"]);
@@ -189,7 +233,7 @@ function App() {
         amount,
         category: "",
         detailDescription: "",
-        attachment: "",
+        attachment: null,
       };
     });
   };
@@ -202,11 +246,12 @@ function App() {
       setImportError("");
       const rows = await parseWorkbook(file);
       const reportDate = rows[0]?.date || new Date().toISOString();
-      const reportMonth = monthLabelFromInput(reportMonthInput) || monthFromDate(reportDate);
+      const monthKey = reportMonthInput || monthKeyFromIsoDate(reportDate);
       const report = {
         id: `${Date.now()}`,
         createdAt: new Date().toISOString(),
-        month: reportMonth,
+        monthKey,
+        monthLabel: monthLabelFromKey(monthKey) || monthLabelFromIsoDate(reportDate),
         rows,
       };
       setDraftReport(report);
@@ -225,7 +270,7 @@ function App() {
       const current = prev[selectedCard.id] || [];
       return { ...prev, [selectedCard.id]: [draftReport, ...current] };
     });
-    setSelectedMonth(draftReport.month);
+    setSelectedMonth(draftReport.monthKey);
     setDraftReport(null);
   };
 
@@ -257,13 +302,19 @@ function App() {
         .filter((row) => row.amount < 0)
         .reduce((sum, row) => sum + row.amount, 0);
 
-      const existing = acc.find((item) => item.month === report.month);
+      const existing = acc.find((item) => item.monthKey === report.monthKey);
       if (existing) {
         existing.reports += 1;
         existing.total += total;
         existing.expenses += expenseOnly;
       } else {
-        acc.push({ month: report.month, reports: 1, total, expenses: expenseOnly });
+        acc.push({
+          monthKey: report.monthKey,
+          monthLabel: report.monthLabel,
+          reports: 1,
+          total,
+          expenses: expenseOnly,
+        });
       }
       return acc;
     }, []);
@@ -273,11 +324,14 @@ function App() {
     if (!selectedCard) return [];
     const reports = reportsByCard[selectedCard.id] || [];
     if (selectedMonth === "all") return reports;
-    return reports.filter((report) => report.month === selectedMonth);
+    return reports.filter((report) => report.monthKey === selectedMonth);
   }, [reportsByCard, selectedCard, selectedMonth]);
 
   const rowsForCurrentFilter = useMemo(
-    () => visibleReports.flatMap((report) => report.rows.map((row) => ({ ...row, month: report.month }))),
+    () =>
+      visibleReports.flatMap((report) =>
+        report.rows.map((row) => ({ ...row, month: report.monthLabel, monthKey: report.monthKey })),
+      ),
     [visibleReports],
   );
 
@@ -291,30 +345,15 @@ function App() {
 
   const exportSummaryPdf = async () => {
     if (!selectedCard) return;
-    const [{ jsPDF }, { default: autoTable }] = await loadPdfTools();
-    const doc = new jsPDF({ orientation: "landscape" });
-    const logo = await loadLogoDataUrl();
-
-    doc.setFillColor(255, 122, 26);
-    doc.rect(0, 0, 300, 22, "F");
-    doc.addImage(logo, "PNG", 8, 4, 30, 12);
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(14);
-    doc.text("Riepilogo Totale Nota Spese", 45, 13);
-    doc.setTextColor(40, 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`, 8, 30);
-    doc.text(`Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`, 8, 36);
-    doc.text(`Saldo iniziale: ${formatAmount(openingBalance)}`, 100, 30);
-    doc.text(`Totale movimenti: ${formatAmount(totalAll)}`, 100, 36);
-    doc.text(`Saldo finale: ${formatAmount(closingBalance)}`, 100, 42);
-
-    autoTable(doc, {
-      startY: 48,
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [255, 122, 26] },
-      head: [["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"]],
-      body: rowsForCurrentFilter.map((row) => [
+    const subtitleLines = [
+      `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
+      `Saldo iniziale: ${formatAmount(openingBalance)}`,
+      `Totale movimenti: ${formatAmount(totalAll)}`,
+      `Saldo finale: ${formatAmount(closingBalance)}`,
+    ];
+    const headers = ["Data", "Mese", "Carta", "Movimento", "Categoria", "Descrizione", "Importo", "Allegato"];
+    const body = rowsForCurrentFilter.map((row) => [
         formatDate(row.date),
         row.month || "-",
         row.cardLabel || "-",
@@ -323,46 +362,29 @@ function App() {
         row.detailDescription || "-",
         formatAmount(row.amount),
         row.attachment?.name || "-",
-      ]),
-    });
-
-    doc.save(`riepilogo-${selectedCard.card_last4}.pdf`);
+      ]);
+    const blob = buildPdfBlob("Riepilogo Totale Nota Spese", subtitleLines, headers, body);
+    downloadBlob(blob, `riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
   const exportExpensesPdf = async () => {
     if (!selectedCard) return;
-    const [{ jsPDF }, { default: autoTable }] = await loadPdfTools();
-    const doc = new jsPDF({ orientation: "landscape" });
-    const logo = await loadLogoDataUrl();
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
-
-    doc.setFillColor(255, 122, 26);
-    doc.rect(0, 0, 300, 22, "F");
-    doc.addImage(logo, "PNG", 8, 4, 30, 12);
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(14);
-    doc.text("Export Sole Spese", 45, 13);
-    doc.setTextColor(40, 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`, 8, 30);
-    doc.text(`Filtro mese: ${selectedMonth === "all" ? "tutti" : selectedMonth}`, 8, 36);
-    doc.text(`Totale sole spese: ${formatAmount(totalExpenses)}`, 100, 30);
-
-    autoTable(doc, {
-      startY: 42,
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [255, 122, 26] },
-      head: [["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"]],
-      body: expenseRows.map((row) => [
+    const subtitleLines = [
+      `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
+      `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
+      `Totale sole spese: ${formatAmount(totalExpenses)}`,
+    ];
+    const headers = ["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"];
+    const body = expenseRows.map((row) => [
         formatDate(row.date),
         row.month || "-",
         row.category || "SENZA CATEGORIA",
         row.detailDescription || "-",
         formatAmount(row.amount),
-      ]),
-    });
-
-    doc.save(`sole-spese-${selectedCard.card_last4}.pdf`);
+      ]);
+    const blob = buildPdfBlob("Export Sole Spese", subtitleLines, headers, body);
+    downloadBlob(blob, `sole-spese-${selectedCard.card_last4}.pdf`);
   };
 
   if (selectedCard) {
@@ -415,12 +437,12 @@ function App() {
             </button>
             {monthlyHistory.map((item) => (
               <button
-                key={item.month}
+                key={item.monthKey}
                 type="button"
-                className={selectedMonth === item.month ? "month active" : "month"}
-                onClick={() => setSelectedMonth(item.month)}
+                className={selectedMonth === item.monthKey ? "month active" : "month"}
+                onClick={() => setSelectedMonth(item.monthKey)}
               >
-                <span>{item.month}</span>
+                <span>{item.monthLabel}</span>
                 <small>
                   {item.reports} note · Tot {formatAmount(item.total)} · Spese {formatAmount(item.expenses)}
                 </small>
@@ -464,7 +486,7 @@ function App() {
 
             {draftReport && (
               <div className="draft-box">
-                <strong>Bozza pronta: {draftReport.month}</strong>
+                <strong>Bozza pronta: {draftReport.monthLabel}</strong>
                 <button type="button" className="accent" onClick={saveDraftReport}>
                   Salva nota spese
                 </button>
@@ -480,7 +502,7 @@ function App() {
               visibleReports.map((report) => (
                 <div key={report.id} className="report-box">
                   <div className="report-head">
-                    <strong>{report.month}</strong>
+                    <strong>{report.monthLabel}</strong>
                     <span>Caricata il {formatDate(report.createdAt)}</span>
                   </div>
 
