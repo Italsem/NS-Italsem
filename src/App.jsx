@@ -97,6 +97,7 @@ const monthStartLabel = (monthKey) => {
 };
 
 let xlsxLoader = null;
+let pdfLoader = null;
 const loadXlsx = async () => {
   if (!xlsxLoader) {
     xlsxLoader = import("https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs");
