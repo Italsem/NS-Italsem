@@ -98,6 +98,7 @@ const monthStartLabel = (monthKey) => {
 
 let xlsxLoader = null;
 let pdfToolsLoader = null;
+let pdfJsLoader = null;
 const loadXlsx = async () => {
   if (!xlsxLoader) {
     xlsxLoader = import("https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs");
@@ -125,8 +126,34 @@ const loadLogoDataUrl = async () => {
   });
 };
 
-const reportStorageKey = (cardId) => `expense-reports-${cardId}`;
+const loadPdfJs = async () => {
+  if (!pdfJsLoader) {
+    pdfJsLoader = import("https://esm.sh/pdfjs-dist@4.7.76/build/pdf.min.mjs").then((mod) => {
+      mod.GlobalWorkerOptions.workerSrc = "https://esm.sh/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs";
+      return mod;
+    });
+  }
+  return pdfJsLoader;
+};
 
+const fileToDataUrl =
+  (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+const dataUrlToUint8Array = (dataUrl) => {
+  const base64 = String(dataUrl).split(",")[1] || "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+
+const reportStorageKey = (cardId) => `expense-reports-${cardId}`;
 
 
 function App() {
@@ -318,6 +345,98 @@ function App() {
     });
   };
 
+  const handleAttachmentChange = async (reportId, rowId, file) => {
+    if (!file) {
+      updateRow(reportId, rowId, "attachment", null);
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file);
+    updateRow(reportId, rowId, "attachment", {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+    });
+  };
+
+  const renderAttachmentPreview = async (attachment) => {
+    if (!attachment?.dataUrl) return null;
+
+    if (attachment.type?.startsWith("image/")) {
+      const format = attachment.type.includes("png") ? "PNG" : "JPEG";
+      return { kind: "image", dataUrl: attachment.dataUrl, format };
+    }
+
+    if (attachment.type === "application/pdf") {
+      try {
+        const pdfjs = await loadPdfJs();
+        const loadingTask = pdfjs.getDocument({ data: dataUrlToUint8Array(attachment.dataUrl) });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.2 });
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: context, viewport }).promise;
+        return { kind: "image", dataUrl: canvas.toDataURL("image/jpeg", 0.88), format: "JPEG" };
+      } catch {
+        return { kind: "pdf", filename: attachment.name };
+      }
+    }
+
+    return { kind: "unsupported", filename: attachment.name };
+  };
+
+  const appendAttachmentsSection = async (doc, rowsWithAttachments) => {
+    if (rowsWithAttachments.length === 0) return;
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const slotX = 32;
+    const slotWidth = pageWidth - slotX * 2;
+    const slotHeight = 330;
+    const slotsY = [72, 430];
+
+    for (let i = 0; i < rowsWithAttachments.length; i += 1) {
+      if (i % 2 === 0) {
+        doc.addPage("a4", "portrait");
+        doc.setFillColor(255, 122, 26);
+        doc.rect(0, 0, pageWidth, 44, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(12);
+        doc.text("NS-ITALSEM · Allegati nota spese", 24, 28);
+      }
+
+      const slotY = slotsY[i % 2];
+      const row = rowsWithAttachments[i];
+      const preview = await renderAttachmentPreview(row.attachment);
+
+      doc.setTextColor(40, 40, 40);
+      doc.setDrawColor(210, 210, 210);
+      doc.roundedRect(slotX, slotY, slotWidth, slotHeight, 6, 6);
+      doc.setFontSize(10);
+      doc.text(
+        `${formatDate(row.date)} · ${row.category || "SENZA CATEGORIA"} · ${formatAmount(row.amount)}`,
+        slotX + 12,
+        slotY + 18,
+      );
+      doc.text(`File: ${row.attachment?.name || "-"}`, slotX + 12, slotY + 34);
+
+      if (preview?.kind === "image") {
+        doc.addImage(preview.dataUrl, preview.format, slotX + 12, slotY + 46, slotWidth - 24, slotHeight - 58);
+      } else {
+        doc.setFontSize(11);
+        doc.text(
+          preview?.kind === "pdf"
+            ? "Anteprima PDF non disponibile: file allegato registrato nel report"
+            : "Formato allegato non supportato in anteprima",
+          slotX + 12,
+          slotY + 62,
+        );
+      }
+    }
+  };
+
   const monthlyHistory = useMemo(() => {
     if (!selectedCard) return [];
     const reports = reportsByCard[selectedCard.id] || [];
@@ -433,6 +552,9 @@ function App() {
       },
     });
 
+    const rowsWithAttachments = rowsForCurrentFilter.filter((row) => row.attachment?.dataUrl);
+    await appendAttachmentsSection(doc, rowsWithAttachments);
+
     doc.save(`riepilogo-${selectedCard.card_last4}.pdf`);
   };
 
@@ -441,10 +563,10 @@ function App() {
     const [{ jsPDF }, autoTableModule] = await loadPdfTools();
     const autoTable = autoTableModule.default;
     const logo = await loadLogoDataUrl();
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
 
     doc.setFillColor(255, 122, 26);
-    doc.rect(0, 0, 842, 56, "F");
+    doc.rect(0, 0, 595, 56, "F");
     doc.addImage(logo, "PNG", 24, 10, 140, 36);
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(14);
@@ -452,6 +574,17 @@ function App() {
     doc.setTextColor(40, 40, 40);
 
     const expenseRows = rowsForCurrentFilter.filter((row) => row.amount < 0);
+    const totalsByCategory = expenseRows.reduce((acc, row) => {
+      const key = row.category || "SENZA CATEGORIA";
+      acc[key] = (acc[key] || 0) + Math.abs(row.amount);
+      return acc;
+    }, {});
+
+    const categoryBody = Object.entries(totalsByCategory)
+      .sort((a, b) => b[1] - a[1])
+      .map(([category, total]) => [`Totale ${category}`, formatAmount(-Math.abs(total))]);
+
+    categoryBody.push(["GRAN TOTALE SPESE", formatAmount(totalExpenses)]);
     const subtitleLines = [
       `Carta: ****${selectedCard.card_last4} - ${selectedCard.holder_name}`,
       `Filtro mese: ${selectedMonth === "all" ? "tutti" : monthLabelFromKey(selectedMonth)}`,
@@ -461,29 +594,24 @@ function App() {
     doc.setFontSize(10);
     subtitleLines.forEach((line, index) => doc.text(line, 24, 78 + index * 14));
 
-    const body = expenseRows.map((row) => [
-        formatDate(row.date),
-        row.month || "-",
-        row.category || "SENZA CATEGORIA",
-        row.detailDescription || "-",
-        formatAmount(row.amount),
-      ]);
-
     autoTable(doc, {
       startY: 140,
-      head: [["Data", "Mese", "Categoria", "Descrizione uscita", "Importo"]],
-      body,
+      head: [["Riepilogo verticale sole spese", "Importo"]],
+      body: categoryBody,
       theme: "grid",
-      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      styles: { fontSize: 10, cellPadding: 6, overflow: "linebreak" },
       headStyles: { fillColor: [255, 122, 26], textColor: [255, 255, 255], fontStyle: "bold" },
       columnStyles: {
-        0: { cellWidth: 70 },
-        1: { cellWidth: 100 },
-        2: { cellWidth: 130 },
-        3: { cellWidth: 430 },
-        4: { cellWidth: 70, halign: "right" },
+        0: { cellWidth: 380 },
+        1: { cellWidth: 140, halign: "right" },
       },
       margin: { left: 24, right: 24 },
+      didParseCell: (data) => {
+        if (data.row.index === categoryBody.length - 1) {
+          data.cell.styles.fillColor = [255, 243, 232];
+          data.cell.styles.fontStyle = "bold";
+        }
+      },
       didDrawPage: () => {
         const pageHeight = doc.internal.pageSize.getHeight();
         doc.setTextColor(120, 120, 120);
@@ -654,19 +782,7 @@ function App() {
                         <input
                           type="file"
                           accept=".pdf,.jpg,.jpeg,.png"
-                          onChange={(e) =>
-                            updateRow(
-                              report.id,
-                              row.id,
-                              "attachment",
-                              e.target.files?.[0]
-                                ? {
-                                    name: e.target.files[0].name,
-                                    type: e.target.files[0].type,
-                                  }
-                                : null,
-                            )
-                          }
+                          onChange={(e) => handleAttachmentChange(report.id, row.id, e.target.files?.[0])}
                         />
                         {row.attachment?.name && <small>{row.attachment.name}</small>}
                       </div>
