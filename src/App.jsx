@@ -620,7 +620,10 @@ function App() {
     .filter((row) => safeNumber(row.amount) < 0)
     .reduce((sum, row) => sum + safeNumber(row.amount), 0);
 
-  const openingBalance = parseAmount(openingBalanceByMonth[selectedMonth] || 0);
+  const effectiveBalanceMonthKey =
+    selectedMonth === "all" ? reportMonthInput || visibleReports[0]?.monthKey || "" : selectedMonth;
+
+  const openingBalance = parseAmount(openingBalanceByMonth[effectiveBalanceMonthKey] || 0);
   const closingBalance = openingBalance + totalAll;
 
   const exportSummaryPdf = async () => {
@@ -825,12 +828,15 @@ function App() {
           <section className="expense-content">
             <div className="totals-box">
               <label>
-                Saldo al {monthStartLabel(selectedMonth === "all" ? visibleReports[0]?.monthKey : selectedMonth)}
+                Saldo al {monthStartLabel(effectiveBalanceMonthKey)}
                 <input
                   type="text"
-                  value={openingBalanceByMonth[selectedMonth] || ""}
+                  value={openingBalanceByMonth[effectiveBalanceMonthKey] || ""}
                   onChange={(e) =>
-                    setOpeningBalanceByMonth((prev) => ({ ...prev, [selectedMonth]: e.target.value }))
+                    setOpeningBalanceByMonth((prev) => ({
+                      ...prev,
+                      [effectiveBalanceMonthKey]: e.target.value,
+                    }))
                   }
                   placeholder="es. 1500,00"
                 />
